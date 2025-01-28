@@ -1,123 +1,104 @@
 extern crate gstreamer as gst;
-use gst::prelude::*;
+extern crate gstreamer_app as gst_app;
+extern crate gstreamer_video as gst_video;
+
+use crate::gst::prelude::ElementExtManual;
+use defer::defer;
+use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
+use std::path::PathBuf;
 
 mod launch;
+mod term_size;
+mod resize_image;
+mod terminal_sink;
 
-fn tutorial_main() {
-    // Initialize GStreamer
-    gst::init().unwrap();
+mod input_handler;
 
-    let uri = "http://desmottes.be/~cassidy/files/brol/test.mkv";
-
-    // Create the elements
-    let source = gst::ElementFactory::make("uridecodebin")
+fn get_source() -> gst::Element {
+    gst::ElementFactory::make("filesrc")
         .name("source")
-        // Set the URI to play
-        .property("uri", uri)
+        .property("location", PathBuf::from(std::env::args_os().nth(1).expect("should pass in argument for file")))
         .build()
-        .expect("Could not create uridecodebin element.");
-    let convert = gst::ElementFactory::make("audioconvert")
-        .name("convert")
-        .build()
-        .expect("Could not create convert element.");
-    let sink = gst::ElementFactory::make("autoaudiosink")
-        .name("sink")
-        .build()
-        .expect("Could not create sink element.");
-    let resample = gst::ElementFactory::make("audioresample")
-        .name("resample")
-        .build()
-        .expect("Could not create resample element.");
+        .unwrap()
+}
 
-    // Create the empty pipeline
-    let pipeline = gst::Pipeline::with_name("test-pipeline");
+fn program_main() {
+    let source = get_source();
+    let decode = gst::ElementFactory::make("decodebin").build().unwrap();
 
-    // Build the pipeline Note that we are NOT linking the source at this
-    // point. We will do it later.
-    pipeline
-        .add_many([&source, &convert, &resample, &sink])
-        .unwrap();
-    gst::Element::link_many([&convert, &resample, &sink]).expect("Elements could not be linked.");
+    let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
 
-    // Connect the pad-added signal
-    source.connect_pad_added(move |src, src_pad| {
-        println!("Received new pad {} from {}", src_pad.name(), src.name());
+    let video_sink = terminal_sink::create();
 
-        src.downcast_ref::<gst::Bin>()
-            .unwrap()
-            .debug_to_dot_file_with_ts(gst::DebugGraphDetails::all(), "pad-added");
+    let audio_sink = gst::ElementFactory::make("autoaudiosink").build().unwrap();
 
-        let sink_pad = convert
-            .static_pad("sink")
-            .expect("Failed to get static sink pad from convert");
-        if sink_pad.is_linked() {
-            println!("We are already linked. Ignoring.");
-            return;
-        }
+    let pipeline = gst::Pipeline::new();
 
-        let new_pad_caps = src_pad
-            .current_caps()
-            .expect("Failed to get caps of new pad.");
-        let new_pad_struct = new_pad_caps
-            .structure(0)
-            .expect("Failed to get first structure of caps.");
-        let new_pad_type = new_pad_struct.name();
+    let line = [&source, &decode, &convert, &video_sink, &audio_sink];
 
-        let is_audio = new_pad_type.starts_with("audio/x-raw");
-        if !is_audio {
-            println!("It has type {new_pad_type} which is not raw audio. Ignoring.");
-            return;
-        }
+    pipeline.add_many(line).unwrap();
 
-        let res = src_pad.link(&sink_pad);
-        if res.is_err() {
-            println!("Type is {new_pad_type} but link failed.");
+    source.link(&decode).unwrap();
+
+    convert.link(&video_sink).unwrap();
+
+    decode.connect_pad_added(move |_decode, src_pad| {
+        let caps = src_pad.current_caps().unwrap();
+        let structure = caps.structure(0).unwrap();
+        let media_type = structure.name();
+
+        if media_type.starts_with("audio/") {
+            let sink_pad = audio_sink.static_pad("sink").unwrap();
+            if sink_pad.is_linked() {
+                return;
+            }
+            src_pad.link(&sink_pad).expect("Failed to link audio pad");
+        } else if media_type.starts_with("video/") {
+            let sink_pad = convert.static_pad("sink").unwrap();
+            if sink_pad.is_linked() {
+                return;
+            }
+            src_pad.link(&sink_pad).expect("Failed to link video pad");
         } else {
-            println!("Link succeeded (type {new_pad_type}).");
+            eprintln!("Unknown pad type: {}", media_type);
         }
     });
 
-    // Start playing
-    pipeline
-        .set_state(gst::State::Playing)
-        .expect("Unable to set the pipeline to the `Playing` state");
+    pipeline.set_state(gst::State::Playing).unwrap();
 
-    // Wait until error or EOS
+    defer! {{
+        pipeline
+            .set_state(gst::State::Null)
+            .unwrap();
+    }}
+
     let bus = pipeline.bus().unwrap();
-    for msg in bus.iter_timed(gst::ClockTime::NONE) {
+
+    let jh = input_handler::start(bus.clone(), pipeline.clone());
+    defer! {{
+        jh.abort();
+    }}
+    for msg in bus.iter_timed(None) {
         use gst::MessageView;
 
         match msg.view() {
             MessageView::Error(err) => {
                 eprintln!(
-                    "Error received from element {:?} {}",
+                    "Error received from element {:?}: {}",
                     err.src().map(|s| s.path_string()),
                     err.error()
                 );
                 eprintln!("Debugging information: {:?}", err.debug());
                 break;
             }
-            MessageView::StateChanged(state_changed) => {
-                if state_changed.src().map(|s| s == &pipeline).unwrap_or(false) {
-                    println!(
-                        "Pipeline state changed from {:?} to {:?}",
-                        state_changed.old(),
-                        state_changed.current()
-                    );
-                }
-            }
             MessageView::Eos(..) => break,
             _ => (),
         }
     }
-
-    pipeline
-        .set_state(gst::State::Null)
-        .expect("Unable to set the pipeline to the `Null` state");
 }
 
 fn main() {
-    // tutorials_common::run is only required to set up the application environment on macOS
+    // launch::run is only required to set up the application environment on macOS
     // (but not necessary in normal Cocoa applications where this is set up automatically)
-    launch::run(tutorial_main);
+    launch::run(program_main);
 }

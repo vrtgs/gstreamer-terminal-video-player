@@ -3,8 +3,21 @@
 /// initialized.
 /// On macOS this launches the callback function on a thread.
 /// On other platforms it's just executed immediately.
+
+pub fn run<T: Send + 'static, F: FnOnce() -> T + Sync + Send + 'static>(main: F) -> T
+where
+    T: Send + 'static,
+{
+    run_(|| {
+        gst::init().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        main()
+    })
+}
+
 #[cfg(not(target_os = "macos"))]
-pub fn run<T, F: FnOnce() -> T + Sync + Send + 'static>(main: F) -> T
+pub fn run_<T: Send + 'static, F: FnOnce() -> T + Sync + Send + 'static>(main: F) -> T
 where
     T: Send + 'static,
 {
@@ -12,10 +25,7 @@ where
 }
 
 #[cfg(target_os = "macos")]
-pub fn run<T, F: FnOnce() -> T + Sync + Send + 'static>(main: F) -> T
-where
-    T: Send + 'static,
-{
+pub fn run_<T: Send + 'static, F: FnOnce() -> T + Sync + Send + 'static>(main: F) -> T {
     use std::{
         ffi::c_void,
         sync::mpsc::{channel, Sender},
