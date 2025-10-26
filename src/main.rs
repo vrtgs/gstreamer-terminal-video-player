@@ -30,17 +30,20 @@ fn program_main() {
 
     let video_sink = terminal_sink::create();
 
+    let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+    let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
     let audio_sink = gst::ElementFactory::make("autoaudiosink").build().unwrap();
 
     let pipeline = gst::Pipeline::new();
 
-    let line = [&source, &decode, &convert, &video_sink, &audio_sink];
+    let line = [&source, &decode, &convert, &audio_convert, &audio_resample, &video_sink, &audio_sink];
 
     pipeline.add_many(line).unwrap();
 
     source.link(&decode).unwrap();
-
     convert.link(&video_sink).unwrap();
+    audio_convert.link(&audio_resample).unwrap();
+    audio_resample.link(&audio_sink).unwrap();
 
     decode.connect_pad_added(move |_decode, src_pad| {
         let caps = src_pad.current_caps().unwrap();
@@ -48,7 +51,7 @@ fn program_main() {
         let media_type = structure.name();
 
         if media_type.starts_with("audio/") {
-            let sink_pad = audio_sink.static_pad("sink").unwrap();
+            let sink_pad = audio_convert.static_pad("sink").unwrap();
             if sink_pad.is_linked() {
                 return;
             }
@@ -78,6 +81,7 @@ fn program_main() {
     defer! {{
         jh.abort();
     }}
+
     for msg in bus.iter_timed(None) {
         use gst::MessageView;
 
