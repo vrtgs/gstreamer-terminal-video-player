@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::sync::Mutex;
 use glib::object::Cast;
 use gst::element_error;
 use gst_app::{AppSink, AppSinkCallbacks};
