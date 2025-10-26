@@ -1,4 +1,4 @@
-# ttv
+# gstreamer-terminal-video-player
 
 This project is a demo of a video playing in the terminal!
 
