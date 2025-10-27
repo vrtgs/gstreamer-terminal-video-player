@@ -10,8 +10,6 @@ where
 {
     run_(|| {
         gst::init().unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
         main()
     })
 }

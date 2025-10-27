@@ -6,6 +6,7 @@ use crate::gst::prelude::ElementExtManual;
 use defer::defer;
 use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
 use std::path::PathBuf;
+use glib::object::ObjectExt;
 
 mod launch;
 mod term_size;
@@ -15,16 +16,21 @@ mod terminal_sink;
 mod input_handler;
 
 fn get_source() -> gst::Element {
+    let arg = std::env::args_os()
+        .nth(1)
+        .expect("should pass in argument for file");
+
+    let file = PathBuf::from(arg);
     gst::ElementFactory::make("filesrc")
         .name("source")
-        .property("location", PathBuf::from(std::env::args_os().nth(1).expect("should pass in argument for file")))
+        .property("location", file)
         .build()
         .unwrap()
 }
 
 fn program_main() {
     let source = get_source();
-    let decode = gst::ElementFactory::make("decodebin").build().unwrap();
+    let decode = gst::ElementFactory::make("decodebin3").build().unwrap();
 
     let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
 
@@ -36,7 +42,15 @@ fn program_main() {
 
     let pipeline = gst::Pipeline::new();
 
-    let line = [&source, &decode, &convert, &audio_convert, &audio_resample, &video_sink, &audio_sink];
+    let line = [
+        &source,
+        &decode,
+        &convert,
+        &audio_convert,
+        &audio_resample,
+        &video_sink,
+        &audio_sink
+    ];
 
     pipeline.add_many(line).unwrap();
 
@@ -46,7 +60,7 @@ fn program_main() {
     audio_resample.link(&audio_sink).unwrap();
 
     decode.connect_pad_added(move |_decode, src_pad| {
-        let caps = src_pad.current_caps().unwrap();
+        let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));
         let structure = caps.structure(0).unwrap();
         let media_type = structure.name();
 
@@ -77,11 +91,8 @@ fn program_main() {
 
     let bus = pipeline.bus().unwrap();
 
-    let jh = input_handler::start(bus.clone(), pipeline.clone());
-    defer! {{
-        jh.abort();
-    }}
-
+    input_handler::start(bus.downgrade(), pipeline.downgrade());
+    
     for msg in bus.iter_timed(None) {
         use gst::MessageView;
 

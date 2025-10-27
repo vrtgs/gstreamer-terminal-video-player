@@ -174,7 +174,11 @@ pub fn create() -> gst::Element {
         )
         .callbacks(
             AppSinkCallbacks::builder()
-                .new_sample(process_sample())
+                .new_sample_if_some(
+                    std::env::var_os("NO_DISPLAY_OUTPUT")
+                        .is_none_or(|str| str.as_encoded_bytes().starts_with(b"n"))
+                        .then(|| process_sample())
+                )
                 .build(),
         )
         .build();

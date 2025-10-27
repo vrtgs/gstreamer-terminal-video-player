@@ -1,29 +1,26 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::Notify;
-
-#[inline(always)]
-const fn to_word((x, y): (u16, u16)) -> u32 {
-    ((x as u32) << 16) | y as u32
-}
-
-#[inline(always)]
-const fn from_word(word: u32) -> (u16, u16) {
-    let lower = word as u16;
-    let upper = (word >> 16) as u16;
-    (upper, lower)
-}
+use parking_lot::{Condvar, Mutex};
 
 const DEFAULT_TERM_SIZE: (u16, u16) = (1, 1);
 
-pub fn get_size_uncached() -> (u16, u16) {
+fn get_size_uncached() -> (u16, u16) {
     termion::terminal_size().unwrap_or(DEFAULT_TERM_SIZE)
 }
 
+enum Signal {
+    Reload,
+    Exit,
+    Wait
+}
+
+struct State {
+    signal: Signal,
+    size: (u16, u16)
+}
+
 struct Shared {
-    exit: Notify,
-    reload: Notify,
-    data: AtomicU32
+    state: Mutex<State>,
+    notification: Condvar,
 }
 
 pub struct TerminalSizeCache {
@@ -32,26 +29,30 @@ pub struct TerminalSizeCache {
 
 impl TerminalSizeCache {
     pub fn new()  -> Self {
-        let load_size = || to_word(get_size_uncached());
+        let load_size = || get_size_uncached();
         let shared = Arc::new(Shared {
-            exit: Notify::new(),
-            reload: Notify::new(),
-            data: AtomicU32::new(load_size())
-        });
-        let shared_ref = Arc::clone(&shared);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-            rt.block_on(async move {
-                let Shared { exit, reload, data } = &*shared_ref;
-                loop {
-                    tokio::select! {
-                        _ = exit  .notified() => break,
-                        _ = reload.notified() => data.store(load_size(), Ordering::Relaxed)
-                    }
-                }
-            })
+            state: Mutex::new(State {
+                signal: Signal::Wait,
+                size: load_size(),
+            }),
+            notification: Condvar::new()
         });
 
+        let shared_ref = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let mut guard = shared_ref.state.lock();
+            loop {
+                let State { signal, size } = &mut *guard;
+                match *signal {
+                    Signal::Reload => {
+                        *size = load_size();
+                        *signal = Signal::Wait;
+                    },
+                    Signal::Exit => break,
+                    Signal::Wait => shared_ref.notification.wait(&mut guard)
+                }
+            }
+        });
 
         Self {
             shared
@@ -59,14 +60,21 @@ impl TerminalSizeCache {
     }
 
     pub fn fetch_size(&self) -> (u16, u16) {
-        let Shared { reload, data, .. } = &*self.shared;
-        reload.notify_waiters();
-        from_word(data.load(Ordering::Relaxed))
+        let mut guard = self.shared.state.lock();
+        let &mut State { ref mut signal, size } = &mut *guard;
+        *signal = Signal::Reload;
+        drop(guard);
+        self.shared.notification.notify_one();
+        size
     }
 }
 
 impl Drop for TerminalSizeCache {
     fn drop(&mut self) {
-        self.shared.exit.notify_one();
+        // signal an exit
+        let mut guard = self.shared.state.lock();
+        guard.signal = Signal::Exit;
+        drop(guard);
+        self.shared.notification.notify_one();
     }
 }
