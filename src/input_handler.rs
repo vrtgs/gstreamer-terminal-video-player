@@ -1,4 +1,5 @@
 use std::sync::{Arc, Once};
+use std::sync::atomic::{AtomicBool, Ordering};
 // use std::sync::atomic::AtomicBool;
 use std::thread;
 use glib::object::ObjectExt;
@@ -74,15 +75,15 @@ fn play_controls(bus: &WeakRef<Bus>, pipeline: &WeakRef<Pipeline>) {
     }
 }
 
-fn exit_handler(bus: &WeakRef<Bus>, _pipeline: &WeakRef<Pipeline>) {
+fn exit_handler(bus: &WeakRef<Bus>, pipeline: &WeakRef<Pipeline>) {
     struct State {
         exit: Once,
-        // one_object_destroyed: AtomicBool
+        one_object_destroyed: AtomicBool
     }
 
     let exit_signal = Arc::new(State {
         exit: Once::new(),
-        // one_object_destroyed: AtomicBool::new(false)
+        one_object_destroyed: AtomicBool::new(false)
     });
 
     let exit_one = Arc::clone(&exit_signal);
@@ -90,9 +91,19 @@ fn exit_handler(bus: &WeakRef<Bus>, _pipeline: &WeakRef<Pipeline>) {
     ctrlc::set_handler(move || exit_one.exit.call_once(|| ())).unwrap();
 
     let _callback1;
-    let _callback2 = ();
-    if let Some(bus) = bus.upgrade() {
-        _callback1 = bus.add_weak_ref_notify(move || exit_two.exit.call_once(|| ()));
+    let _callback2;
+    if let Some(bus) = bus.upgrade()
+        && let Some(pipe) = pipeline.upgrade() {
+        let exit_cb = |exit: Arc<State>| {
+            move || {
+                if exit.one_object_destroyed.swap(true, Ordering::AcqRel) {
+                    exit.exit.call_once(|| ())
+                }
+            }
+        };
+
+        _callback1 = bus.add_weak_ref_notify(exit_cb(exit_two.clone()));
+        _callback2 = pipe.add_weak_ref_notify(exit_cb(exit_two));
         return;
     }
 
