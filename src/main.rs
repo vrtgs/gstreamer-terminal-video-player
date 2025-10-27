@@ -56,8 +56,7 @@ fn program_main() {
 
     source.link(&decode).unwrap();
     convert.link(&video_sink).unwrap();
-    audio_convert.link(&audio_resample).unwrap();
-    audio_resample.link(&audio_sink).unwrap();
+    gst::Element::link_many([&audio_convert, &audio_resample, &audio_sink]).unwrap();
 
     decode.connect_pad_added(move |_decode, src_pad| {
         let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));

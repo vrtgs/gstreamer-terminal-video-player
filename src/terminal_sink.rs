@@ -164,14 +164,14 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
 }
 
 pub fn create() -> gst::Element {
+    let caps = gst_video::VideoCapsBuilder::new()
+        .format(VideoFormat::Rgb)
+        .build();
+    
     let app = AppSink::builder()
         .name("terminal player")
         .sync(true)
-        .caps(
-            &gst_video::VideoCapsBuilder::new()
-                .format(VideoFormat::Rgb)
-                .build(),
-        )
+        .caps(&caps)
         .callbacks(
             AppSinkCallbacks::builder()
                 .new_sample_if_some(
