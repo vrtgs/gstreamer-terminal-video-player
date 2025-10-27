@@ -20,7 +20,7 @@ image = "0.25.8"
 defer = "0.2.1"
 ctrlc = "3.5.0"
 ansi_term = "0.12.1"
-termion = "4.0.5"
+termion = { version = "4.0.5", default-features = false }
 parking_lot = "0.12.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]

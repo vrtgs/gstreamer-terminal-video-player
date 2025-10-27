@@ -111,11 +111,11 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             /* fill */false
         );
 
-        let resized = image::imageops::resize(
+
+        let resized = image::imageops::thumbnail(
             &image,
             new_width,
             new_height,
-            image::imageops::FilterType::Lanczos3
         );
 
         let mut screen_buff = Vec::with_capacity(resized.as_raw().len() * 12);

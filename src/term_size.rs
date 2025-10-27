@@ -29,11 +29,10 @@ pub struct TerminalSizeCache {
 
 impl TerminalSizeCache {
     pub fn new()  -> Self {
-        let load_size = || get_size_uncached();
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 signal: Signal::Wait,
-                size: load_size(),
+                size: get_size_uncached(),
             }),
             notification: Condvar::new()
         });
@@ -45,7 +44,7 @@ impl TerminalSizeCache {
                 let State { signal, size } = &mut *guard;
                 match *signal {
                     Signal::Reload => {
-                        *size = load_size();
+                        *size = get_size_uncached();
                         *signal = Signal::Wait;
                     },
                     Signal::Exit => break,
@@ -67,6 +66,15 @@ impl TerminalSizeCache {
         self.shared.notification.notify_one();
         size
     }
+
+    // if this was a crate
+    // pub fn fetch_size_force(&self) -> (u16, u16) {
+    //     let mut guard = self.shared.state.lock();
+    //     let State { signal, size } = &mut *guard;
+    //     *signal = Signal::Wait;
+    //     *size = get_size_uncached();
+    //     *size
+    // }
 }
 
 impl Drop for TerminalSizeCache {
