@@ -8,7 +8,10 @@ use termion::screen::IntoAlternateScreen;
 use crate::{resize_image, term_size};
 
 fn cursor_goto(x: u16, y: u16) -> termion::cursor::Goto {
-    termion::cursor::Goto(x.saturating_add(1), y.saturating_add(1))
+    termion::cursor::Goto(
+        x.saturating_add(1),
+        y.saturating_add(1)
+    )
 }
 
 macro_rules! queue {
@@ -26,8 +29,6 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         .expect("app should be ran on xterm compatible terminals");
 
     let mut last_size = (u16::MAX, u16::MAX);
-    let mut last_offset = (u16::MAX, u16::MAX);
-    let mut padding = String::new();
 
     queue!(
         stdout,
@@ -90,7 +91,6 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             gst::FlowError::Error
         })?;
 
-        let mut mismatched_size = false;
         let term_size = size_cache.fetch_size();
         if last_size != term_size {
             last_size = term_size;
@@ -98,7 +98,6 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
                 stdout,
                 termion::clear::All
             );
-            mismatched_size = true;
         }
 
         let (term_width, term_height) = term_size;
@@ -113,39 +112,30 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         );
 
 
+        let (new_width, new_height) = (new_width as u16, new_height as u16);
+
         let resized = image::imageops::thumbnail(
             &image,
-            new_width,
-            new_height,
+            new_width.into(),
+            new_height.into(),
         );
 
-        let mut screen_buff = Vec::with_capacity(resized.as_raw().len() * 12);
+        let mut screen_buff = Vec::with_capacity(resized.as_raw().len() * 24 + 480);
         let offset = (
-            (term_width-(new_width as u16))/2,
-            (term_height-(new_height as u16))/2
+            (term_width-(new_width))/2,
+            (term_height-(new_height))/2
         );
 
         let (offset_width, offset_height) = offset;
 
-        if last_offset != offset {
-            last_offset = offset;
-            mismatched_size |= true;
-        }
+        for (i, row) in resized.rows().enumerate() {
+            write!(screen_buff, "{}", cursor_goto(
+                offset_width,
+                // total terminal height is at most u16::MAX
+                // so this shouldn't overflow
+                offset_height + i as u16,
+            )).unwrap();
 
-        if mismatched_size {
-            padding.clear();
-            padding.reserve(2 + usize::from(new_width as u16));
-            padding += "\r\n";
-            padding.extend(std::iter::repeat_n(' ', offset_width.into()));
-        }
-
-        write!(screen_buff, "{}", cursor_goto(
-            offset_height,
-            offset_width,
-        )).unwrap();
-
-        for row in resized.rows() {
-            screen_buff.extend_from_slice(padding.as_bytes());
             for &cell in row {
                 const UNICODE_BLOCK: &str = "\u{2588}";
                 let [r, g, b] = cell.0;
@@ -165,12 +155,13 @@ pub fn create() -> gst::Element {
     let caps = gst_video::VideoCapsBuilder::new()
         .format(VideoFormat::Rgb)
         .build();
-    
+
     let app = AppSink::builder()
         .name("terminal player")
         .sync(true)
-        .drop(true)
         .max_buffers(1)
+        // .property("leaky-type", gst_app::AppLeakyType::Downstream)
+        .drop(true)
         .caps(&caps)
         .callbacks(
             AppSinkCallbacks::builder()
