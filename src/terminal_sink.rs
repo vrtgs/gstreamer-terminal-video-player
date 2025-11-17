@@ -40,15 +40,21 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         let mut lock = std::io::stdout().lock();
         queue!(
             lock,
-            termion::cursor::Show
+            termion::cursor::Show,
         )
     });
 
     stdout.flush().unwrap();
 
+    // 8mb default
+    let mut screen_buff = Vec::with_capacity(8 * 1024 * 1024);
+
     move |me| {
         // move defer to closure
         let _ = &defer;
+
+        // make sure screen buffer is empty
+        screen_buff.clear();
 
         let sample = me.pull_sample().map_err(|_| gst::FlowError::Eos)?;
         let caps = sample.caps().ok_or_else(|| {
@@ -95,7 +101,7 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         if last_size != term_size {
             last_size = term_size;
             queue!(
-                stdout,
+                screen_buff,
                 termion::clear::All
             );
         }
@@ -120,7 +126,8 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             new_height.into(),
         );
 
-        let mut screen_buff = Vec::with_capacity(resized.as_raw().len() * 24 + 480);
+        screen_buff.reserve(resized.as_raw().len() * 24 + 480);
+
         let offset = (
             (term_width-(new_width))/2,
             (term_height-(new_height))/2
