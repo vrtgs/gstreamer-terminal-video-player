@@ -22,7 +22,8 @@ macro_rules! queue {
 
 fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::FlowError> + Send + 'static {
     let size_cache = term_size::TerminalSizeCache::new();
-    let mut stdout = std::io::stdout()
+    let mut stdout = termion::get_tty()
+        .expect("couldn't get a handle to the raw tty")
         .into_raw_mode()
         .expect("terminal needs to support raw terminal I/O mode")
         .into_alternate_screen()
@@ -191,7 +192,7 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
 
         }
 
-        let mut stdout = stdout.lock();
+        // let mut stdout = stdout.lock();
         stdout.write_all(&screen_buff).unwrap();
         stdout.flush().unwrap();
 
