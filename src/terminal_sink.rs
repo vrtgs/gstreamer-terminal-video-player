@@ -170,6 +170,7 @@ pub fn create() -> gst::Element {
         .name("terminal player")
         .sync(true)
         .drop(true)
+        .max_buffers(1)
         .caps(&caps)
         .callbacks(
             AppSinkCallbacks::builder()
