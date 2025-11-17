@@ -169,6 +169,7 @@ pub fn create() -> gst::Element {
     let app = AppSink::builder()
         .name("terminal player")
         .sync(true)
+        .drop(true)
         .caps(&caps)
         .callbacks(
             AppSinkCallbacks::builder()
