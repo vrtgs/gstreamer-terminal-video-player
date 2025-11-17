@@ -103,12 +103,13 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
 
         let (term_width, term_height) = term_size;
 
-        let (new_width, new_height) = resize_image::resize_dimensions(
+
+        //                                                                        -fill-
+        let (new_width, new_height) = resize_image::resize_dimensions::<false>(
             image.width(),
             image.height(),
             term_width.into(),
             term_height.into(),
-            /* fill */false
         );
 
 
@@ -135,10 +136,7 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             padding.clear();
             padding.reserve(2 + usize::from(new_width as u16));
             padding += "\r\n";
-
-            for _ in 0..offset_width {
-                padding.push(' ')
-            }
+            padding.extend(std::iter::repeat_n(' ', offset_width.into()));
         }
 
         write!(screen_buff, "{}", cursor_goto(
