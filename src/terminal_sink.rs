@@ -114,7 +114,12 @@ fn process_sample()
 
         let (new_width, new_height) = (new_width as u16, new_height as u16);
 
-        let resized = image::imageops::thumbnail(&image, new_width.into(), new_height.into());
+        let resized = image::imageops::resize(
+            &image,
+            new_width.into(),
+            new_height.into(),
+            image::imageops::Nearest
+        );
 
         // a good enough size each pixel gets 48 bytes because ansi is that inefficient
         // and 24 bytes for each newlines goto
