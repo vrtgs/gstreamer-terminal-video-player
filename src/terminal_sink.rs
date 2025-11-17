@@ -28,7 +28,7 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         .into_alternate_screen()
         .expect("app should be ran on xterm compatible terminals");
 
-    let mut last_size = (u16::MAX, u16::MAX);
+    let mut last_size = (0, 0);
 
     queue!(
         stdout,
@@ -98,14 +98,21 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         })?;
 
         let term_size = size_cache.fetch_size();
-        if last_size != term_size {
-            last_size = term_size;
+
+        let pixels_available = {
+            let (width, height) = term_size;
+            (width, height.saturating_mul(2))
+        };
+
+        if last_size != pixels_available {
+            last_size = pixels_available;
             queue!(
                 screen_buff,
                 termion::clear::All
             );
         }
 
+        let height_pixels_available = pixels_available.1;
         let (term_width, term_height) = term_size;
 
 
@@ -114,7 +121,7 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             image.width(),
             image.height(),
             term_width.into(),
-            term_height.into(),
+            height_pixels_available.into(),
         );
 
 
@@ -126,35 +133,62 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             new_height.into(),
         );
 
-        // a good enough size each pixel gets 32 bytes because ansi is that inefficient
+        // a good enough size each pixel gets 48 bytes because ansi is that inefficient
         // and 24 bytes for each newlines goto
         // and a constant 512 bytes extra for good measure
         screen_buff.reserve(
-            (resized.as_raw().len() * 32)
+            (resized.as_raw().len() * 48)
                 + (usize::from(new_height) * 24)
                 + 512
         );
 
         let offset = (
             (term_width-(new_width))/2,
-            (term_height-(new_height))/2
+            (term_height-(new_height.div_ceil(2)))/2
         );
 
         let (offset_width, offset_height) = offset;
 
-        for (i, row) in resized.rows().enumerate() {
+        let mut rows_iter = resized.rows();
+        let mut current = 0;
+
+        'rendering:
+        while let Some(first_row) = rows_iter.next() {
+            const UNICODE_TOP_HALF_BLOCK: &str = "\u{2580}";
+
             write!(screen_buff, "{}", cursor_goto(
                 offset_width,
                 // total terminal height is at most u16::MAX
                 // so this shouldn't overflow
-                offset_height + i as u16,
+                offset_height + current,
             )).unwrap();
 
-            for &cell in row {
-                const UNICODE_BLOCK: &str = "\u{2588}";
-                let [r, g, b] = cell.0;
-                ansi_term::Color::RGB(r, g, b).paint(UNICODE_BLOCK.as_bytes()).write_to(&mut screen_buff).unwrap();
+            let Some(second_row) = rows_iter.next() else {
+                for &cell in first_row {
+                    let [r, g, b] = cell.0;
+                    ansi_term::Color::RGB(r, g, b)
+                        .on(ansi_term::Colour::Black)
+                        .paint(UNICODE_TOP_HALF_BLOCK.as_bytes())
+                        .write_to(&mut screen_buff)
+                        .unwrap();
+                }
+                break 'rendering
+            };
+
+            assert_eq!(first_row.len(), second_row.len());
+
+            for (top, bottom) in first_row.zip(second_row) {
+                let [tr, tg, tb] = top.0;
+                let [br, bg, bb] = bottom.0;
+                ansi_term::Color::RGB(tr, tg, tb)
+                    .on(ansi_term::Colour::RGB(br, bg, bb))
+                    .paint(UNICODE_TOP_HALF_BLOCK.as_bytes())
+                    .write_to(&mut screen_buff)
+                    .unwrap();
             }
+
+            current += 1;
+
         }
 
         let mut stdout = stdout.lock();
@@ -174,7 +208,7 @@ pub fn create() -> gst::Element {
         .name("terminal player")
         .sync(true)
         .max_buffers(1)
-        // .property("leaky-type", gst_app::AppLeakyType::Downstream)
+        // .leaky_type(gst_app::AppLeakyType::Downstream)
         .drop(true)
         .caps(&caps)
         .callbacks(
