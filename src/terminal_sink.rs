@@ -1,17 +1,14 @@
-use std::io::Write;
+use crate::{resize_image, term_size};
 use glib::object::Cast;
 use gst::element_error;
 use gst_app::{AppSink, AppSinkCallbacks};
 use gst_video::{VideoFormat, VideoInfo};
+use std::io::Write;
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
-use crate::{resize_image, term_size};
 
 fn cursor_goto(x: u16, y: u16) -> termion::cursor::Goto {
-    termion::cursor::Goto(
-        x.saturating_add(1),
-        y.saturating_add(1)
-    )
+    termion::cursor::Goto(x.saturating_add(1), y.saturating_add(1))
 }
 
 macro_rules! queue {
@@ -20,7 +17,8 @@ macro_rules! queue {
     };
 }
 
-fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::FlowError> + Send + 'static {
+fn process_sample()
+-> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::FlowError> + Send + 'static {
     let size_cache = term_size::TerminalSizeCache::new();
     let mut stdout = termion::get_tty()
         .expect("couldn't get a handle to the raw tty")
@@ -31,18 +29,11 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
 
     let mut last_size = (0, 0);
 
-    queue!(
-        stdout,
-        termion::clear::All,
-        termion::cursor::Hide
-    );
+    queue!(stdout, termion::clear::All, termion::cursor::Hide);
 
     let defer = defer::defer(|| {
         let mut lock = std::io::stdout().lock();
-        queue!(
-            lock,
-            termion::cursor::Show,
-        )
+        queue!(lock, termion::cursor::Show,)
     });
 
     stdout.flush().unwrap();
@@ -65,15 +56,15 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
 
         let video_info = VideoInfo::from_caps(&caps).map_err(|err| {
             element_error!(me, gst::ResourceError::Failed, ("{}", err));
-
             gst::FlowError::Error
         })?;
+
         let buffer = sample.buffer().ok_or_else(|| {
             element_error!(
-                            me,
-                            gst::ResourceError::Failed,
-                            ("Failed to get buffer from appsink")
-                        );
+                me,
+                gst::ResourceError::Failed,
+                ("Failed to get buffer from appsink")
+            );
 
             gst::FlowError::Error
         })?;
@@ -107,15 +98,11 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
 
         if last_size != pixels_available {
             last_size = pixels_available;
-            queue!(
-                screen_buff,
-                termion::clear::All
-            );
+            queue!(screen_buff, termion::clear::All);
         }
 
         let height_pixels_available = pixels_available.1;
         let (term_width, term_height) = term_size;
-
 
         //                                                                        -fill-
         let (new_width, new_height) = resize_image::resize_dimensions::<false>(
@@ -125,27 +112,20 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             height_pixels_available.into(),
         );
 
-
         let (new_width, new_height) = (new_width as u16, new_height as u16);
 
-        let resized = image::imageops::thumbnail(
-            &image,
-            new_width.into(),
-            new_height.into(),
-        );
+        let resized = image::imageops::thumbnail(&image, new_width.into(), new_height.into());
 
         // a good enough size each pixel gets 48 bytes because ansi is that inefficient
         // and 24 bytes for each newlines goto
         // and a constant 512 bytes extra for good measure
         screen_buff.reserve(
-            (resized.as_raw().len() * 48)
-                + (usize::from(new_height) * 24)
-                + 512
+            (resized.as_raw().len() * 48) + (usize::from(new_height.div_ceil(2)) * 24) + 512,
         );
 
         let offset = (
-            (term_width-(new_width))/2,
-            (term_height-(new_height.div_ceil(2)))/2
+            (term_width - (new_width)) / 2,
+            (term_height - (new_height.div_ceil(2))) / 2,
         );
 
         let (offset_width, offset_height) = offset;
@@ -153,16 +133,20 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
         let mut rows_iter = resized.rows();
         let mut current = 0;
 
-        'rendering:
-        while let Some(first_row) = rows_iter.next() {
+        'rendering: while let Some(first_row) = rows_iter.next() {
             const UNICODE_TOP_HALF_BLOCK: &str = "\u{2580}";
 
-            write!(screen_buff, "{}", cursor_goto(
-                offset_width,
-                // total terminal height is at most u16::MAX
-                // so this shouldn't overflow
-                offset_height + current,
-            )).unwrap();
+            write!(
+                screen_buff,
+                "{}",
+                cursor_goto(
+                    offset_width,
+                    // total terminal height is at most u16::MAX
+                    // so this shouldn't overflow
+                    offset_height + current,
+                )
+            )
+            .unwrap();
 
             let Some(second_row) = rows_iter.next() else {
                 for &cell in first_row {
@@ -173,7 +157,7 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
                         .write_to(&mut screen_buff)
                         .unwrap();
                 }
-                break 'rendering
+                break 'rendering;
             };
 
             assert_eq!(first_row.len(), second_row.len());
@@ -189,7 +173,6 @@ fn process_sample() -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::Flo
             }
 
             current += 1;
-
         }
 
         // let mut stdout = stdout.lock();
@@ -217,7 +200,7 @@ pub fn create() -> gst::Element {
                 .new_sample_if_some(
                     std::env::var_os("NO_DISPLAY_OUTPUT")
                         .is_none_or(|str| str.as_encoded_bytes().starts_with(b"n"))
-                        .then(|| process_sample())
+                        .then(|| process_sample()),
                 )
                 .build(),
         )

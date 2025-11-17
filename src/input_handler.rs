@@ -1,8 +1,8 @@
-use std::thread;
 use glib::WeakRef;
-use gst::{Bus, Message, Pipeline, State};
 use gst::message::Eos;
 use gst::prelude::{ElementExt, ElementExtManual};
+use gst::{Bus, Message, Pipeline, State};
+use std::thread;
 use termion::event::Key;
 use termion::input::TermRead;
 
@@ -12,9 +12,8 @@ fn seek_relative(pipeline: &Pipeline, bus: &Bus, offset: i8) {
 
         let new_position = match offset {
             0.. => current_position.saturating_add(seek_offset),
-            ..0 => current_position.saturating_sub(seek_offset)
+            ..0 => current_position.saturating_sub(seek_offset),
         };
-
 
         let seeked = pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
@@ -25,7 +24,7 @@ fn seek_relative(pipeline: &Pipeline, bus: &Bus, offset: i8) {
             pipeline.set_state(State::Playing).ok();
             bus.timed_pop_filtered(
                 gst::ClockTime::from_mseconds(50),
-                &[gst::MessageType::AsyncDone]
+                &[gst::MessageType::AsyncDone],
             );
             pipeline.set_state(State::Paused).ok();
         }
@@ -55,14 +54,14 @@ fn play_controls(bus: &WeakRef<Bus>, pipeline: &WeakRef<Pipeline>) {
                 state = match state {
                     State::Playing => State::Paused,
                     State::Paused => State::Playing,
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 };
             }
             Key::Up => state = State::Playing,
             Key::Down => state = State::Paused,
             Key::Ctrl('c') | Key::Char('q' | 'Q') | Key::Esc => {
                 bus.post(Message::from(Eos::builder().build())).unwrap()
-            },
+            }
             _ => {}
         }
 

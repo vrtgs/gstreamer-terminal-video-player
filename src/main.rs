@@ -4,13 +4,13 @@ extern crate gstreamer_video as gst_video;
 
 use crate::gst::prelude::ElementExtManual;
 use defer::defer;
+use glib::object::ObjectExt;
 use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
 use std::path::PathBuf;
-use glib::object::ObjectExt;
 
 mod launch;
-mod term_size;
 mod resize_image;
+mod term_size;
 mod terminal_sink;
 
 mod input_handler;
@@ -49,7 +49,7 @@ fn program_main() {
         &audio_convert,
         &audio_resample,
         &video_sink,
-        &audio_sink
+        &audio_sink,
     ];
 
     pipeline.add_many(line).unwrap();
@@ -59,7 +59,9 @@ fn program_main() {
     gst::Element::link_many([&audio_convert, &audio_resample, &audio_sink]).unwrap();
 
     decode.connect_pad_added(move |_decode, src_pad| {
-        let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));
+        let caps = src_pad
+            .current_caps()
+            .unwrap_or_else(|| src_pad.query_caps(None));
         let structure = caps.structure(0).unwrap();
         let media_type = structure.name();
 
@@ -91,7 +93,7 @@ fn program_main() {
     let bus = pipeline.bus().unwrap();
 
     input_handler::start(bus.downgrade(), pipeline.downgrade());
-    
+
     for msg in bus.iter_timed(None) {
         use gst::MessageView;
 

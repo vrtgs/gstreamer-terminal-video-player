@@ -28,14 +28,14 @@ where
 {
     use std::{
         cell::RefCell,
-        sync::mpsc::{channel, Sender},
+        sync::mpsc::{Sender, channel},
         thread,
     };
 
     use dispatch::Queue;
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+    use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent,
         NSEventModifierFlags, NSEventSubtype, NSEventType,
@@ -114,5 +114,3 @@ where
 
     t.join().unwrap()
 }
-
-

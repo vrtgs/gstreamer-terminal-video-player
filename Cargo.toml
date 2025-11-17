@@ -15,11 +15,11 @@ strip = false
 gstreamer = { version = "0.24.3", features = ["v1_26"] }
 gstreamer-app = { version = "0.24.2", features = ["v1_26"] }
 gstreamer-video = { version = "0.24.3", features = ["v1_26"] }
+termion = { version = "4.0.5", default-features = false }
 glib = "0.21.4"
 image = "0.25.9"
 defer = "0.2.1"
 ansi_term = "0.12.1"
-termion = { version = "4.0.5", default-features = false }
 parking_lot = "0.12.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]

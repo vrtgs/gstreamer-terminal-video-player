@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 
 const DEFAULT_TERM_SIZE: (u16, u16) = (1, 1);
 
@@ -10,12 +10,12 @@ fn get_size_uncached() -> (u16, u16) {
 enum Signal {
     Reload,
     Exit,
-    Wait
+    Wait,
 }
 
 struct State {
     signal: Signal,
-    size: (u16, u16)
+    size: (u16, u16),
 }
 
 struct Shared {
@@ -24,17 +24,17 @@ struct Shared {
 }
 
 pub struct TerminalSizeCache {
-    shared: Arc<Shared>
+    shared: Arc<Shared>,
 }
 
 impl TerminalSizeCache {
-    pub fn new()  -> Self {
+    pub fn new() -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 signal: Signal::Wait,
                 size: get_size_uncached(),
             }),
-            notification: Condvar::new()
+            notification: Condvar::new(),
         });
 
         let shared_ref = Arc::clone(&shared);
@@ -46,21 +46,22 @@ impl TerminalSizeCache {
                     Signal::Reload => {
                         *size = get_size_uncached();
                         *signal = Signal::Wait;
-                    },
+                    }
                     Signal::Exit => break,
-                    Signal::Wait => shared_ref.notification.wait(&mut guard)
+                    Signal::Wait => shared_ref.notification.wait(&mut guard),
                 }
             }
         });
 
-        Self {
-            shared
-        }
+        Self { shared }
     }
 
     pub fn fetch_size(&self) -> (u16, u16) {
         let mut guard = self.shared.state.lock();
-        let &mut State { ref mut signal, size } = &mut *guard;
+        let &mut State {
+            ref mut signal,
+            size,
+        } = &mut *guard;
         *signal = Signal::Reload;
         drop(guard);
         self.shared.notification.notify_one();

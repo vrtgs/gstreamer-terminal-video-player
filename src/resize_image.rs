@@ -50,8 +50,9 @@ mod test {
 
     #[test]
     fn resize_never_rounds_to_zero() {
-        let (1.., 1..) = super::resize_dimensions::<false>(1, 150, 128, 128)
-            else { panic!() };
+        let (1.., 1..) = super::resize_dimensions::<false>(1, 150, 128, 128) else {
+            panic!()
+        };
     }
 
     #[test]
