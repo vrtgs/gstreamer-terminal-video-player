@@ -7,9 +7,13 @@ edition = "2024"
 opt-level = 3
 debug-assertions = false
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
-strip = false
+strip = true
+lto = "fat"
 
 [dependencies]
 gstreamer = { version = "0.24.3", features = ["v1_26"] }

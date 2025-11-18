@@ -6,7 +6,7 @@ use std::thread;
 use termion::event::Key;
 use termion::input::TermRead;
 
-fn seek_relative(pipeline: &Pipeline, bus: &Bus, offset: i8) {
+fn seek_relative(pipeline: &Pipeline, _bus: &Bus, offset: i8) {
     if let Some(current_position) = pipeline.query_position::<gst::ClockTime>() {
         let seek_offset = gst::ClockTime::from_seconds(offset.unsigned_abs().into());
 
@@ -15,19 +15,10 @@ fn seek_relative(pipeline: &Pipeline, bus: &Bus, offset: i8) {
             ..0 => current_position.saturating_sub(seek_offset),
         };
 
-        let seeked = pipeline.seek_simple(
+        let _ = pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             new_position,
         );
-
-        if seeked.is_ok() && pipeline.current_state() == State::Paused {
-            pipeline.set_state(State::Playing).ok();
-            bus.timed_pop_filtered(
-                gst::ClockTime::from_mseconds(50),
-                &[gst::MessageType::AsyncDone],
-            );
-            pipeline.set_state(State::Paused).ok();
-        }
     }
 }
 

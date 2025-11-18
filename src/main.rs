@@ -2,6 +2,7 @@ extern crate gstreamer as gst;
 extern crate gstreamer_app as gst_app;
 extern crate gstreamer_video as gst_video;
 
+use std::os::fd::IntoRawFd;
 use crate::gst::prelude::ElementExtManual;
 use defer::defer;
 use glib::object::ObjectExt;
@@ -20,12 +21,48 @@ fn get_source() -> gst::Element {
         .nth(1)
         .expect("should pass in argument for file");
 
-    let file = PathBuf::from(arg);
-    gst::ElementFactory::make("filesrc")
-        .name("source")
-        .property("location", file)
-        .build()
-        .unwrap()
+    macro_rules! exit {
+        ($($msg: tt)+) => {
+            {
+                eprintln!($($msg)+);
+                std::process::exit(-1);
+            }
+        };
+    }
+
+    let file_path = PathBuf::from(arg);
+
+    match std::fs::File::open(&file_path) {
+        Ok(file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+
+                let fd = file.as_raw_fd();
+                gst::ElementFactory::make("fdsrc")
+                    .name("source")
+                    .property("fd", fd)
+                    .build()
+                    .inspect(|_| {
+                        // if the element was built forget the file
+                        // and DO NOT drop it
+                        let _fd = file.into_raw_fd();
+                    })
+                    .unwrap()
+            }
+
+            #[cfg(not(unix))]
+            {
+                drop(file);
+                gst::ElementFactory::make("filesrc")
+                    .name("source")
+                    .property("location", file_path)
+                    .build()
+                    .unwrap()
+            }
+        },
+        Err(err) => exit!("couldn't open file: {err}")
+    }
 }
 
 fn program_main() {
