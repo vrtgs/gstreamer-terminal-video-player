@@ -157,7 +157,6 @@ fn process_sample()
                 for &cell in first_row {
                     let [r, g, b] = cell.0;
                     ansi_term::Color::RGB(r, g, b)
-                        .on(ansi_term::Colour::Black)
                         .paint(UNICODE_TOP_HALF_BLOCK.as_bytes())
                         .write_to(&mut screen_buff)
                         .unwrap();
