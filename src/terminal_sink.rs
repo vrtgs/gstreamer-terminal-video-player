@@ -4,8 +4,11 @@ use gst::element_error;
 use gst_app::{AppSink, AppSinkCallbacks};
 use gst_video::{VideoFormat, VideoInfo};
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::Duration;
+use gst::prelude::ElementExtManual;
 use parking_lot::{Condvar, Mutex};
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
@@ -162,55 +165,202 @@ fn render_sample(
 }
 
 
-enum RenderState {
-    None,
-    Some(gst::Sample),
-    OtherPipeQuit,
-}
+
 
 // THE WHOLE THING IS NOT UNWIND SAFE
 
 #[cfg(not(test))]
 const _: () = assert!(cfg!(panic = "abort"));
 
+enum RenderState {
+    None,
+    HasSample {
+        sample: gst::Sample,
+        pulled: bool,
+    },
+    OtherPipeQuit,
+}
+
 struct RenderingContext {
-    sample: Mutex<RenderState>,
+    state: Mutex<RenderState>,
     sample_notification: Condvar,
 }
 
+struct RenderingContextPipe(Arc<RenderingContext>);
+
+impl Drop for RenderingContextPipe {
+    fn drop(&mut self) {
+        let mut lock = self.0.state.lock();
+        *lock = RenderState::OtherPipeQuit;
+        drop(lock);
+        self.0.sample_notification.notify_one();
+    }
+}
+
+#[derive(Clone)]
+struct SampleProducer(Arc<RenderingContextPipe>);
+
+impl SampleProducer {
+    pub fn push_sample(&self, sample: gst::Sample) -> Result<(), ()> {
+        let this: &RenderingContext = &*self.0.0;
+
+        let mut lock = this.state.lock();
+        match &mut *lock {
+            // still rendering...
+            RenderState::HasSample {
+                sample: old_sample,
+                pulled: false
+            } => *old_sample = sample,
+            RenderState::OtherPipeQuit => return Err(()),
+            slot => {
+                *slot = RenderState::HasSample {
+                    sample,
+                    pulled: false
+                };
+                drop(lock);
+                this.sample_notification.notify_one();
+            },
+        }
+
+        Ok(())
+    }
+}
+
+
+struct SampleConsumer(RenderingContextPipe);
+
+impl SampleConsumer {
+    pub fn pull_sample(&self) -> Result<gst::Sample, ()> {
+        let this: &RenderingContext = &*self.0.0;
+
+        let mut lock = this.state.lock();
+        loop {
+            match &mut *lock {
+                RenderState::None | RenderState::HasSample { pulled: true, .. } => this.sample_notification.wait(&mut lock),
+                RenderState::HasSample {
+                    sample,
+                    pulled: pulled @ false
+                } => {
+                    *pulled = true;
+                    break Ok(sample.clone())
+                },
+                RenderState::OtherPipeQuit => return Err(()),
+            }
+        }
+    }
+
+    pub fn make_reloader(&self) -> SampleReloader {
+        SampleReloader(Arc::downgrade(&self.0.0))
+    }
+}
+
+
+struct SampleReloader(Weak<RenderingContext>);
+
+impl SampleReloader {
+    pub fn reload_sample(&self) -> Result<(), ()> {
+        let Some(this) = self.0.upgrade() else {
+            return Err(())
+        };
+
+        let this: &RenderingContext = &this;
+
+        let mut lock = this.state.lock();
+        match &mut *lock {
+            RenderState::None => Ok(()),
+            RenderState::HasSample { pulled, .. } => {
+                *pulled = false;
+                drop(lock);
+                this.sample_notification.notify_one();
+                Ok(())
+            }
+            RenderState::OtherPipeQuit => Err(())
+        }
+    }
+}
+
+
+fn video_pipe() -> (SampleProducer, SampleConsumer) {
+    let ctx = Arc::new(const {
+        RenderingContext {
+            state: Mutex::new(RenderState::None),
+            sample_notification: Condvar::new(),
+        }
+    });
+
+    let pipe1 = RenderingContextPipe(Arc::clone(&ctx));
+    let pipe2 = RenderingContextPipe(Arc::clone(&ctx));
+
+    (SampleProducer(Arc::new(pipe1)), SampleConsumer(pipe2))
+}
+
+
 fn send_new_sample(
-    ctx: Arc<RenderingContext>,
+    pipe: SampleProducer,
     pull_sample: fn(&AppSink) -> Result<gst::Sample, glib::BoolError>,
 ) -> impl FnMut(&AppSink) -> Result<gst::FlowSuccess, gst::FlowError> + Send + 'static {
     move |me| {
         let sample = pull_sample(me).map_err(|_| {
-            *ctx.sample.lock() = RenderState::OtherPipeQuit;
-            ctx.sample_notification.notify_one();
             gst::FlowError::Eos
         })?;
 
-        {
-            let mut lock = ctx.sample.lock();
-            match &mut *lock {
-                slot @ RenderState::None => {
-                    *slot = RenderState::Some(sample);
-                    drop(lock);
-                    ctx.sample_notification.notify_one();
-                },
-                // still rendering...
-                RenderState::Some(old_sample) => *old_sample = sample,
-                RenderState::OtherPipeQuit => return Err(gst::FlowError::Error),
-            }
+        // if std::ptr::fn_addr_eq(pull_sample, AppSink::pull_preroll as fn(_) -> _) {
+        //     eprintln!("pre roll")
+        // }
+
+        if pipe.push_sample(sample).is_err() {
+            #[cold]
+            #[inline(always)]
+            fn cold_path() {}
+            cold_path();
+
+            return Err(gst::FlowError::Error)
         }
+
         Ok(gst::FlowSuccess::Ok)
     }
 }
 
 fn run_renderer_thread(
-    ctx: Arc<RenderingContext>,
+    consumer: SampleConsumer,
     app_sink: AppSink
 ) {
-    let size_cache = term_size::TerminalSizeCache::new();
+    const TOP_BIT: u64 = 1 << 63;
+
+    let size_cache = Arc::new(AtomicU64::new(0));
+    let size_cache_clone = Arc::clone(&size_cache);
+
+    let store_new_size = move |size: (u16, u16)| {
+        let (lo, hi) = size;
+        let num = bytemuck::must_cast::<[u16; 2], u32>([lo, hi]);
+        size_cache_clone.store((num as u64) | TOP_BIT, Ordering::Relaxed)
+    };
+
+    let app_sink_clone = app_sink.clone();
+    let reloader = consumer.make_reloader();
+    let size_cache_updater = term_size::TerminalSizeUpdater::new(
+        Duration::from_millis(280),
+        move |new_size| {
+            if app_sink_clone.current_state() == gst::State::Paused {
+                let _ = reloader.reload_sample();
+            }
+
+            store_new_size(new_size)
+        }
+    );
+
+    let size_cache = &*size_cache;
+    let load_size_from_cache = move || -> ((u16, u16), bool) {
+        size_cache_updater.trigger_reload();
+        // remove the top bit to signal to the next load that HEY this value didn't change
+        let value = size_cache.fetch_and(!TOP_BIT, Ordering::Relaxed);
+        let changed = (value & TOP_BIT) != 0;
+        let [lo, hi] = bytemuck::must_cast::<u32, [u16;2]>(value as u32);
+
+        ((lo, hi), changed)
+    };
+
+
     let mut stdout = termion::get_tty()
         .expect("couldn't get a handle to the raw tty")
         .into_raw_mode()
@@ -218,38 +368,33 @@ fn run_renderer_thread(
         .into_alternate_screen()
         .expect("app should be ran on xterm compatible terminals");
 
-    queue!(stdout, termion::clear::All, termion::cursor::Hide);
+    // there will be a clear on the first fetch from the size cache
+    // so wait until first render before clearing
+    queue!(stdout, termion::cursor::Hide);
 
     stdout.flush().unwrap();
 
     // 8mb default
     let mut screen_buff = Vec::with_capacity(8 * 1024 * 1024);
-    let mut last_size = (0, 0);
 
     'render_loop: loop {
-        let sample = loop {
-            let mut lock = ctx.sample.lock();
-            match core::mem::replace(&mut *lock, RenderState::None) {
-                RenderState::None => ctx.sample_notification.wait(&mut lock),
-                RenderState::Some(sample) => break sample,
-                RenderState::OtherPipeQuit => break 'render_loop,
-            }
+        let sample = match consumer.pull_sample() {
+            Ok(sample) => sample,
+            Err(()) => break 'render_loop
         };
 
-        let new_size = size_cache.fetch_size();
-        let old_size = std::mem::replace(&mut last_size, new_size);
+        let (size, size_changed) = load_size_from_cache();
 
         let res = render_sample(
             &sample,
             &app_sink,
-            new_size,
-            old_size != new_size,
+            size,
+            size_changed,
             &mut screen_buff,
             &mut stdout,
         );
 
         if res.is_err() {
-            *ctx.sample.lock() = RenderState::OtherPipeQuit;
             break
         }
     }
@@ -268,12 +413,7 @@ pub fn create() -> gst::Element {
     let renderer_enabled = std::env::var_os("NO_DISPLAY_OUTPUT")
         .is_none_or(|str| str.as_encoded_bytes().starts_with(b"n"));
 
-    let ctx = Arc::new(const {
-        RenderingContext {
-            sample: Mutex::new(RenderState::None),
-            sample_notification: Condvar::new(),
-        }
-    });
+    let (producer, consumer) = video_pipe();
 
     let app = AppSink::builder()
         .name("terminal player")
@@ -282,19 +422,21 @@ pub fn create() -> gst::Element {
         .callbacks(
             AppSinkCallbacks::builder()
                 .new_sample_if(
-                    send_new_sample(Arc::clone(&ctx), AppSink::pull_sample),
+                    send_new_sample(producer.clone(), AppSink::pull_sample),
                     renderer_enabled,
                 )
                 .new_preroll_if(
-                    send_new_sample(Arc::clone(&ctx), AppSink::pull_preroll),
+                    send_new_sample(producer, AppSink::pull_preroll),
                     renderer_enabled,
                 )
                 .build(),
         )
         .build();
 
-    let app_clone = app.clone();
-    thread::spawn(move || run_renderer_thread(ctx, app_clone));
+    if renderer_enabled {
+        let app_clone = app.clone();
+        thread::spawn(move || run_renderer_thread(consumer, app_clone));
+    }
 
     app.upcast()
 }

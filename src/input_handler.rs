@@ -16,7 +16,7 @@ fn seek_relative(pipeline: &Pipeline, _bus: &Bus, offset: i8) {
         };
 
         let _ = pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             new_position,
         );
     }

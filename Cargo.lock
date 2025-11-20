@@ -630,6 +630,7 @@ name = "gstreamer-terminal-video-player"
 version = "0.1.0"
 dependencies = [
  "ansi_term",
+ "bytemuck",
  "defer",
  "dispatch",
  "glib",
