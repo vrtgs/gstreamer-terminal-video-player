@@ -298,10 +298,6 @@ fn send_new_sample(
     move |me| {
         let sample = pull_sample(me).map_err(|_| gst::FlowError::Eos)?;
 
-        // if std::ptr::fn_addr_eq(pull_sample, AppSink::pull_preroll as fn(_) -> _) {
-        //     eprintln!("pre roll")
-        // }
-
         if pipe.push_sample(sample).is_err() {
             #[cold]
             #[inline(always)]
