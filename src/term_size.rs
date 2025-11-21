@@ -25,18 +25,19 @@ pub struct TerminalSizeUpdater {
 impl TerminalSizeUpdater {
     fn new_inner(
         periodic_interval: Duration,
-        mut on_size_change: Box<dyn FnMut((u16, u16)) + Send>
+        mut on_size_change: Box<dyn FnMut((u16, u16)) + Send>,
     ) -> Self {
         let initial_size = get_size_uncached();
         on_size_change(initial_size);
 
-        let shared = Arc::new(const {
-            Shared {
-                state: Mutex::new(Signal::Active),
-                notification: Condvar::new(),
-            }
-        });
-
+        let shared = Arc::new(
+            const {
+                Shared {
+                    state: Mutex::new(Signal::Active),
+                    notification: Condvar::new(),
+                }
+            },
+        );
 
         let shared_ref = Arc::clone(&shared);
         let interval = periodic_interval;
@@ -61,13 +62,12 @@ impl TerminalSizeUpdater {
             }
         });
 
-
         Self { shared }
     }
 
     pub fn new(
         periodic_interval: Duration,
-        on_size_change: impl FnMut((u16, u16)) + Send + 'static
+        on_size_change: impl FnMut((u16, u16)) + Send + 'static,
     ) -> Self {
         Self::new_inner(periodic_interval, Box::new(on_size_change))
     }

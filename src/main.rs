@@ -2,11 +2,11 @@ extern crate gstreamer as gst;
 extern crate gstreamer_app as gst_app;
 extern crate gstreamer_video as gst_video;
 
-use std::os::fd::IntoRawFd;
 use crate::gst::prelude::ElementExtManual;
 use defer::defer;
 use glib::object::ObjectExt;
 use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
+use std::os::fd::IntoRawFd;
 use std::path::PathBuf;
 
 mod launch;
@@ -60,8 +60,8 @@ fn get_source() -> gst::Element {
                     .build()
                     .unwrap()
             }
-        },
-        Err(err) => exit!("couldn't open file: {err}")
+        }
+        Err(err) => exit!("couldn't open file: {err}"),
     }
 }
 
