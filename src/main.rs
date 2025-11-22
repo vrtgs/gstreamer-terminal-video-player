@@ -3,7 +3,6 @@ extern crate gstreamer_app as gst_app;
 extern crate gstreamer_video as gst_video;
 
 use crate::gst::prelude::ElementExtManual;
-use defer::defer;
 use glib::object::ObjectExt;
 use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
 use std::os::fd::IntoRawFd;
@@ -65,13 +64,13 @@ fn get_source() -> gst::Element {
     }
 }
 
-fn program_main() {
+fn make_pipeline_and_bus(quit_handler: &mut QuitHandler) -> (gst::Pipeline, gst::Bus) {
     let source = get_source();
     let decode = gst::ElementFactory::make("decodebin3").build().unwrap();
 
     let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
 
-    let video_sink = terminal_sink::create();
+    let video_sink = terminal_sink::create(quit_handler);
 
     let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
     let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
@@ -121,13 +120,37 @@ fn program_main() {
 
     pipeline.set_state(gst::State::Playing).unwrap();
 
-    defer! {{
-        pipeline
-            .set_state(gst::State::Null)
-            .unwrap();
-    }}
-
     let bus = pipeline.bus().unwrap();
+
+    (pipeline, bus)
+}
+
+pub struct QuitHandler {
+    callbacks: Vec<Box<dyn FnOnce()>>,
+}
+
+impl QuitHandler {
+    pub fn add(&mut self, callback: impl FnOnce() + 'static) {
+        self.callbacks.push(Box::new(callback))
+    }
+}
+
+impl Drop for QuitHandler {
+    fn drop(&mut self) {
+        for callback in self.callbacks.drain(..) {
+            callback()
+        }
+    }
+}
+
+fn program_main() {
+    let mut quit_handler = QuitHandler { callbacks: vec![] };
+
+    let (pipeline, bus) = make_pipeline_and_bus(&mut quit_handler);
+
+    let defer = defer::defer(|| {
+        pipeline.set_state(gst::State::Null).unwrap();
+    });
 
     input_handler::start(bus.downgrade(), pipeline.downgrade());
 
@@ -136,15 +159,23 @@ fn program_main() {
 
         match msg.view() {
             MessageView::Error(err) => {
+                drop((bus, defer));
+                drop(pipeline);
+                drop(quit_handler);
+
+                eprintln!("{}", termion::clear::All);
+
                 eprintln!(
                     "Error received from element {:?}: {}",
-                    err.src().map(|s| s.path_string()),
+                    err.src()
+                        .map(|s| s.path_string())
+                        .unwrap_or_else(|| glib::gstr!("unknown").to_owned()),
                     err.error()
                 );
                 eprintln!("Debugging information: {:?}", err.debug());
                 break;
             }
-            MessageView::Eos(..) => break,
+            MessageView::Eos(_) => break,
             _ => (),
         }
     }

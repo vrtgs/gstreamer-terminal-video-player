@@ -1,4 +1,5 @@
-use crate::{resize_image, term_size};
+use crate::terminal_sink::resize::{ImageRef, ResizeBuffer, Resizer};
+use crate::{QuitHandler, resize_image, term_size};
 use glib::object::Cast;
 use gst::element_error;
 use gst::prelude::ElementExtManual;
@@ -6,6 +7,7 @@ use gst_app::{AppSink, AppSinkCallbacks};
 use gst_video::{VideoFormat, VideoInfo};
 use parking_lot::{Condvar, Mutex};
 use std::io::Write;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread;
@@ -23,12 +25,16 @@ macro_rules! queue {
     };
 }
 
+mod resize;
+
 fn render_sample(
     sample: &gst::Sample,
     app_sink: &AppSink,
     term_size: (u16, u16),
     fresh_redraw: bool,
     screen_buffer: &mut Vec<u8>,
+    resize_buffer: &mut ResizeBuffer,
+    resizer: &mut Resizer,
     stdout: &mut dyn Write,
 ) -> Result<(), ()> {
     // make sure screen buffer is empty
@@ -57,11 +63,7 @@ fn render_sample(
         );
     })?;
 
-    let res = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
-        video_info.width(),
-        video_info.height(),
-        &buffer,
-    );
+    let res = ImageRef::from_buffer(video_info.width(), video_info.height(), &buffer);
 
     let image = res.ok_or_else(|| {
         element_error!(
@@ -85,20 +87,21 @@ fn render_sample(
 
     //                                                                        -fill-
     let (new_width, new_height) = resize_image::resize_dimensions::<false>(
-        image.width(),
-        image.height(),
+        video_info.width(),
+        video_info.height(),
         term_width.into(),
         height_pixels_available.into(),
     );
 
     let (new_width, new_height) = (new_width as u16, new_height as u16);
 
-    let resized = image::imageops::thumbnail(
-        &image,
-        new_width.into(),
-        new_height.into(),
-        // image::imageops::Nearest
-    );
+    let resized = {
+        if resize_buffer.width() != new_width || resize_buffer.height() != new_height {
+            resize_buffer.resize((new_width, new_height))
+        }
+
+        resizer.resize(image, resize_buffer).as_image_crate_buffer()
+    };
 
     // a good enough size each pixel gets 48 bytes because ansi is that inefficient
     // and 24 bytes for each newlines goto
@@ -174,7 +177,7 @@ const _: () = assert!(cfg!(panic = "abort"));
 enum RenderState {
     None,
     HasSample { sample: gst::Sample, pulled: bool },
-    OtherPipeQuit,
+    Closed,
 }
 
 struct RenderingContext {
@@ -187,7 +190,7 @@ struct RenderingContextPipe(Arc<RenderingContext>);
 impl Drop for RenderingContextPipe {
     fn drop(&mut self) {
         let mut lock = self.0.state.lock();
-        *lock = RenderState::OtherPipeQuit;
+        *lock = RenderState::Closed;
         drop(lock);
         self.0.sample_notification.notify_one();
     }
@@ -207,7 +210,7 @@ impl SampleProducer {
                 sample: old_sample,
                 pulled: false,
             } => *old_sample = sample,
-            RenderState::OtherPipeQuit => return Err(()),
+            RenderState::Closed => return Err(()),
             slot => {
                 *slot = RenderState::HasSample {
                     sample,
@@ -219,6 +222,12 @@ impl SampleProducer {
         }
 
         Ok(())
+    }
+
+    pub fn close(&self) {
+        let this: &RenderingContext = &*self.0.0;
+        *this.state.lock() = RenderState::Closed;
+        this.sample_notification.notify_one();
     }
 }
 
@@ -241,7 +250,7 @@ impl SampleConsumer {
                     *pulled = true;
                     break Ok(sample.clone());
                 }
-                RenderState::OtherPipeQuit => return Err(()),
+                RenderState::Closed => return Err(()),
             }
         }
     }
@@ -270,7 +279,7 @@ impl SampleReloader {
                 this.sample_notification.notify_one();
                 Ok(())
             }
-            RenderState::OtherPipeQuit => Err(()),
+            RenderState::Closed => Err(()),
         }
     }
 }
@@ -311,6 +320,14 @@ fn send_new_sample(
     }
 }
 
+fn flag(flag: &str, default: bool) -> bool {
+    std::env::var_os(flag).map_or(default, |str| {
+        let mut str = str.into_encoded_bytes();
+        str.make_ascii_lowercase();
+        matches!(&*str, b"y" | b"yes")
+    })
+}
+
 fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
     const TOP_BIT: u64 = 1 << 63;
 
@@ -338,28 +355,45 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
     let load_size_from_cache = move || -> ((u16, u16), bool) {
         size_cache_updater.trigger_reload();
         // remove the top bit to signal to the next load that HEY this value didn't change
-        let value = size_cache.fetch_and(!TOP_BIT, Ordering::Relaxed);
+        let value = size_cache.fetch_and(const { !TOP_BIT }, Ordering::Relaxed);
         let changed = (value & TOP_BIT) != 0;
         let [lo, hi] = bytemuck::must_cast::<u32, [u16; 2]>(value as u32);
 
         ((lo, hi), changed)
     };
 
-    let mut stdout = termion::get_tty()
-        .expect("couldn't get a handle to the raw tty")
-        .into_raw_mode()
-        .expect("terminal needs to support raw terminal I/O mode")
-        .into_alternate_screen()
-        .expect("app should be ran on xterm compatible terminals");
+    let mut tty_file;
+    let mut stdout;
+
+    trait TTY: Write + AsFd + AsRawFd {}
+    impl<T: Write + AsFd + AsRawFd> TTY for T {}
+
+    fn make_tty<T: TTY>(tty: T) -> impl Write {
+        tty.into_raw_mode()
+            .expect("terminal needs to support raw terminal I/O mode")
+            .into_alternate_screen()
+            .expect("app should be ran on xterm compatible terminals")
+    }
+
+    let use_stdout = flag("USE_STDOUT", false);
+    let tty: &mut dyn Write = if !use_stdout && let Ok(tty) = termion::get_tty() {
+        tty_file = make_tty(tty);
+        &mut tty_file
+    } else {
+        stdout = make_tty(std::io::stdout().lock());
+        &mut stdout
+    };
 
     // there will be a clear on the first fetch from the size cache
     // so wait until first render before clearing
-    queue!(stdout, termion::cursor::Hide);
+    queue!(tty, termion::cursor::Hide);
 
-    stdout.flush().unwrap();
+    tty.flush().unwrap();
 
     // 8mb default
     let mut screen_buff = Vec::with_capacity(8 * 1024 * 1024);
+    let mut resize_buffer = ResizeBuffer::new();
+    let mut resizer = Resizer::new();
 
     'render_loop: loop {
         let sample = match consumer.pull_sample() {
@@ -375,7 +409,9 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
             size,
             size_changed,
             &mut screen_buff,
-            &mut stdout,
+            &mut resize_buffer,
+            &mut resizer,
+            tty,
         );
 
         if res.is_err() {
@@ -383,18 +419,15 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
         }
     }
 
-    queue!(stdout, termion::cursor::Show)
+    queue!(tty, termion::cursor::Show)
 }
 
-pub fn create() -> gst::Element {
+pub fn create(quit_handler: &mut QuitHandler) -> gst::Element {
     let caps = gst_video::VideoCapsBuilder::new()
         .format(VideoFormat::Rgb)
         .build();
 
-    // try .leaky_type(gst_app::AppLeakyType::Downstream) later on
-
-    let renderer_enabled = std::env::var_os("NO_DISPLAY_OUTPUT")
-        .is_none_or(|str| str.as_encoded_bytes().starts_with(b"n"));
+    let renderer_enabled = !flag("NO_DISPLAY_OUTPUT", false);
 
     let (producer, consumer) = video_pipe();
 
@@ -409,7 +442,7 @@ pub fn create() -> gst::Element {
                     renderer_enabled,
                 )
                 .new_preroll_if(
-                    send_new_sample(producer, AppSink::pull_preroll),
+                    send_new_sample(producer.clone(), AppSink::pull_preroll),
                     renderer_enabled,
                 )
                 .build(),
@@ -418,7 +451,11 @@ pub fn create() -> gst::Element {
 
     if renderer_enabled {
         let app_clone = app.clone();
-        thread::spawn(move || run_renderer_thread(consumer, app_clone));
+        let jh = thread::spawn(move || run_renderer_thread(consumer, app_clone));
+        quit_handler.add(move || {
+            producer.close();
+            jh.join().unwrap()
+        })
     }
 
     app.upcast()
