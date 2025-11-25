@@ -1,51 +1,47 @@
-use crate::terminal_sink::resize::{ImageRef, ResizeBuffer, Resizer};
+use crate::terminal_sink::resize::{ImageRef, RenderedFrame, ResizeBuffer, Resizer};
+use crate::terminal_sink::video_pipe::{SampleConsumer, SampleProducer};
 use crate::{QuitHandler, resize_image, term_size};
 use glib::object::Cast;
 use gst::element_error;
 use gst::prelude::ElementExtManual;
 use gst_app::{AppSink, AppSinkCallbacks};
 use gst_video::{VideoFormat, VideoInfo};
-use parking_lot::{Condvar, Mutex};
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
 
+mod resize;
+mod video_pipe;
+
 fn cursor_goto(x: u16, y: u16) -> termion::cursor::Goto {
     termion::cursor::Goto(x.saturating_add(1), y.saturating_add(1))
 }
-
-macro_rules! queue {
-    ($s: expr $(, $thing: expr)+ $(,)?) => {
-        (Ok(()) $(.and_then(|()| $s.write_all($thing.as_ref())))+).unwrap()
-    };
-}
-
-mod resize;
 
 fn render_sample(
     sample: &gst::Sample,
     app_sink: &AppSink,
     term_size: (u16, u16),
     fresh_redraw: bool,
-    screen_buffer: &mut Vec<u8>,
+    command_buffer: &mut Vec<u8>,
     resize_buffer: &mut ResizeBuffer,
     resizer: &mut Resizer,
+    last_frame: &mut RenderedFrame,
     stdout: &mut dyn Write,
 ) -> Result<(), ()> {
     // make sure screen buffer is empty
-    screen_buffer.clear();
+    command_buffer.clear();
 
     let caps = sample.caps().ok_or_else(|| {
         element_error!(app_sink, gst::ResourceError::Failed, ("Sample has no caps"));
     })?;
 
     let video_info = VideoInfo::from_caps(&caps).map_err(|err| {
-        element_error!(app_sink, gst::ResourceError::Failed, ("{}", err));
+        element_error!(app_sink, gst::ResourceError::Failed, ("{err}"));
     })?;
 
     let buffer = sample.buffer().ok_or_else(|| {
@@ -59,7 +55,7 @@ fn render_sample(
         element_error!(
             app_sink,
             gst::ResourceError::Failed,
-            ("Failed to map buffer readable; {}", err)
+            ("Failed to map buffer readable; {err}")
         );
     })?;
 
@@ -69,7 +65,7 @@ fn render_sample(
         element_error!(
             app_sink,
             gst::ResourceError::Failed,
-            ("invalid image divisions")
+            ("invalid video sample divisions")
         );
     })?;
 
@@ -77,10 +73,6 @@ fn render_sample(
         let (width, height) = term_size;
         (width, height.saturating_mul(2))
     };
-
-    if fresh_redraw {
-        queue!(screen_buffer, termion::clear::All);
-    }
 
     let height_pixels_available = pixels_available.1;
     let (term_width, term_height) = term_size;
@@ -109,61 +101,16 @@ fn render_sample(
     let expected_size =
         (resized.as_raw().len() * 48) + (usize::from(new_height.div_ceil(2)) * 24) + 512;
 
-    screen_buffer.reserve(expected_size);
+    command_buffer.reserve(expected_size);
 
     let offset = (
         (term_width - (new_width)) / 2,
         (term_height - (new_height.div_ceil(2))) / 2,
     );
 
-    let (offset_width, offset_height) = offset;
+    last_frame.render(resized, fresh_redraw, offset, command_buffer);
 
-    let mut rows_iter = resized.rows();
-    let mut current = 0;
-
-    'rendering: while let Some(first_row) = rows_iter.next() {
-        const UNICODE_TOP_HALF_BLOCK: &str = "\u{2580}";
-
-        write!(
-            screen_buffer,
-            "{}",
-            cursor_goto(
-                offset_width,
-                // total terminal height is at most u16::MAX
-                // so this shouldn't overflow
-                offset_height + current,
-            )
-        )
-        .unwrap();
-
-        let Some(second_row) = rows_iter.next() else {
-            for &cell in first_row {
-                let [r, g, b] = cell.0;
-                ansi_term::Color::RGB(r, g, b)
-                    .paint(UNICODE_TOP_HALF_BLOCK.as_bytes())
-                    .write_to(screen_buffer)
-                    .unwrap();
-            }
-            break 'rendering;
-        };
-
-        assert_eq!(first_row.len(), second_row.len());
-
-        for (top, bottom) in first_row.zip(second_row) {
-            let [tr, tg, tb] = top.0;
-            let [br, bg, bb] = bottom.0;
-            ansi_term::Color::RGB(tr, tg, tb)
-                .on(ansi_term::Colour::RGB(br, bg, bb))
-                .paint(UNICODE_TOP_HALF_BLOCK.as_bytes())
-                .write_to(screen_buffer)
-                .unwrap();
-        }
-
-        current += 1;
-    }
-
-    // let mut stdout = stdout.lock();
-    stdout.write_all(screen_buffer).unwrap();
+    stdout.write_all(command_buffer).unwrap();
     stdout.flush().unwrap();
 
     Ok(())
@@ -173,132 +120,6 @@ fn render_sample(
 
 #[cfg(not(test))]
 const _: () = assert!(cfg!(panic = "abort"));
-
-enum RenderState {
-    None,
-    HasSample { sample: gst::Sample, pulled: bool },
-    Closed,
-}
-
-struct RenderingContext {
-    state: Mutex<RenderState>,
-    sample_notification: Condvar,
-}
-
-struct RenderingContextPipe(Arc<RenderingContext>);
-
-impl Drop for RenderingContextPipe {
-    fn drop(&mut self) {
-        let mut lock = self.0.state.lock();
-        *lock = RenderState::Closed;
-        drop(lock);
-        self.0.sample_notification.notify_one();
-    }
-}
-
-#[derive(Clone)]
-struct SampleProducer(Arc<RenderingContextPipe>);
-
-impl SampleProducer {
-    pub fn push_sample(&self, sample: gst::Sample) -> Result<(), ()> {
-        let this: &RenderingContext = &*self.0.0;
-
-        let mut lock = this.state.lock();
-        match &mut *lock {
-            // still rendering...
-            RenderState::HasSample {
-                sample: old_sample,
-                pulled: false,
-            } => *old_sample = sample,
-            RenderState::Closed => return Err(()),
-            slot => {
-                *slot = RenderState::HasSample {
-                    sample,
-                    pulled: false,
-                };
-                drop(lock);
-                this.sample_notification.notify_one();
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn close(&self) {
-        let this: &RenderingContext = &*self.0.0;
-        *this.state.lock() = RenderState::Closed;
-        this.sample_notification.notify_one();
-    }
-}
-
-struct SampleConsumer(RenderingContextPipe);
-
-impl SampleConsumer {
-    pub fn pull_sample(&self) -> Result<gst::Sample, ()> {
-        let this: &RenderingContext = &*self.0.0;
-
-        let mut lock = this.state.lock();
-        loop {
-            match &mut *lock {
-                RenderState::None | RenderState::HasSample { pulled: true, .. } => {
-                    this.sample_notification.wait(&mut lock)
-                }
-                RenderState::HasSample {
-                    sample,
-                    pulled: pulled @ false,
-                } => {
-                    *pulled = true;
-                    break Ok(sample.clone());
-                }
-                RenderState::Closed => return Err(()),
-            }
-        }
-    }
-
-    pub fn make_reloader(&self) -> SampleReloader {
-        SampleReloader(Arc::downgrade(&self.0.0))
-    }
-}
-
-struct SampleReloader(Weak<RenderingContext>);
-
-impl SampleReloader {
-    pub fn reload_sample(&self) -> Result<(), ()> {
-        let Some(this) = self.0.upgrade() else {
-            return Err(());
-        };
-
-        let this: &RenderingContext = &this;
-
-        let mut lock = this.state.lock();
-        match &mut *lock {
-            RenderState::None => Ok(()),
-            RenderState::HasSample { pulled, .. } => {
-                *pulled = false;
-                drop(lock);
-                this.sample_notification.notify_one();
-                Ok(())
-            }
-            RenderState::Closed => Err(()),
-        }
-    }
-}
-
-fn video_pipe() -> (SampleProducer, SampleConsumer) {
-    let ctx = Arc::new(
-        const {
-            RenderingContext {
-                state: Mutex::new(RenderState::None),
-                sample_notification: Condvar::new(),
-            }
-        },
-    );
-
-    let pipe1 = RenderingContextPipe(Arc::clone(&ctx));
-    let pipe2 = RenderingContextPipe(Arc::clone(&ctx));
-
-    (SampleProducer(Arc::new(pipe1)), SampleConsumer(pipe2))
-}
 
 fn send_new_sample(
     pipe: SampleProducer,
@@ -386,14 +207,14 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
 
     // there will be a clear on the first fetch from the size cache
     // so wait until first render before clearing
-    queue!(tty, termion::cursor::Hide);
-
+    tty.write_all(termion::cursor::Hide.as_ref()).unwrap();
     tty.flush().unwrap();
 
     // 8mb default
     let mut screen_buff = Vec::with_capacity(8 * 1024 * 1024);
     let mut resize_buffer = ResizeBuffer::new();
     let mut resizer = Resizer::new();
+    let mut last_frame = RenderedFrame::new();
 
     'render_loop: loop {
         let sample = match consumer.pull_sample() {
@@ -411,6 +232,7 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
             &mut screen_buff,
             &mut resize_buffer,
             &mut resizer,
+            &mut last_frame,
             tty,
         );
 
@@ -419,7 +241,7 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink) {
         }
     }
 
-    queue!(tty, termion::cursor::Show)
+    tty.write_all(termion::cursor::Show.as_ref()).unwrap()
 }
 
 pub fn create(quit_handler: &mut QuitHandler) -> gst::Element {
@@ -429,7 +251,7 @@ pub fn create(quit_handler: &mut QuitHandler) -> gst::Element {
 
     let renderer_enabled = !flag("NO_DISPLAY_OUTPUT", false);
 
-    let (producer, consumer) = video_pipe();
+    let (producer, consumer) = video_pipe::video_pipe();
 
     let app = AppSink::builder()
         .name("terminal player")

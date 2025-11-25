@@ -19,8 +19,8 @@ lto = "fat"
 gstreamer = { version = "0.24.3", features = ["v1_26"] }
 gstreamer-app = { version = "0.24.2", features = ["v1_26"] }
 gstreamer-video = { version = "0.24.3", features = ["v1_26"] }
-termion = { version = "4.0.5", default-features = false }
-bytemuck = { version = "1.24.0", features = ["must_cast_extra", "min_const_generics"] }
+termion = { version = "4.0.6", default-features = false }
+bytemuck = { version = "1.24.0", features = ["must_cast_extra", "min_const_generics", "derive"] }
 glib = "0.21.4"
 image = "0.25.9"
 defer = "0.2.1"
