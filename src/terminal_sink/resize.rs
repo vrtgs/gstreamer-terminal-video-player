@@ -166,6 +166,22 @@ pub struct RenderedFrame {
     frame: PodMatrix<Cell>,
 }
 
+fn within_delta(a: [u8; 3], b: [u8; 3]) -> bool {
+    const DIFF: f32 = 4.0;
+
+    let [dr, dg, db] = core::array::from_fn(|i| a[i] as f32 - b[i] as f32);
+
+    // Weighted Euclidean distance in RGB
+    let distance2 = 0.299 * dr * dr + 0.587 * dg * dg + 0.114 * db * db;
+
+    distance2 <= const { DIFF * DIFF }
+}
+
+// fn within_delta(a: [u8; 3], b: [u8; 3]) -> bool {
+//     let [dr, dg, db] = core::array::from_fn(|i| a[i].abs_diff(b[i]));
+//     dr.max(dg).max(db) <= 6
+// }
+
 impl RenderedFrame {
     pub fn new() -> Self {
         Self {
@@ -191,7 +207,7 @@ impl RenderedFrame {
 
         let overwrite = overwrite || terminal_size != self.frame.size;
         if terminal_size != self.frame.size {
-            self.frame.resize(terminal_size)
+            self.frame.resize(terminal_size);
         }
 
         if overwrite {
@@ -207,41 +223,31 @@ impl RenderedFrame {
             .unwrap();
         };
 
-        let overwrite_and_render =
-            move |this: &mut Self, command_buffer: &mut Vec<u8>, image: I| {
-                for j in 0..height {
-                    for i in 0..width {
-                        let rgb = image.get_pixel(i, j).0;
-                        let pixel = this.frame.get_mut(i as u16, (j / 2) as u16).unwrap();
-                        match j & 1 {
-                            0 => pixel.rgb_top = rgb,
-                            _ => pixel.rgb_bottom = rgb,
-                        }
-                    }
-                }
-
-                for j in 0..terminal_height {
-                    write_move(command_buffer, 0, j);
-                    for i in 0..terminal_width {
-                        this.frame.get_mut(i, j).unwrap().draw(command_buffer)
-                    }
-                }
-            };
-
         if overwrite {
+            for j in 0..height {
+                for i in 0..width {
+                    let rgb = image.get_pixel(i, j).0;
+                    let pixel = self.frame.get_mut(i as u16, (j / 2) as u16).unwrap();
+                    match j & 1 {
+                        0 => pixel.rgb_top = rgb,
+                        _ => pixel.rgb_bottom = rgb,
+                    }
+                }
+            }
+
             if (height % 2) != 0 {
                 for pixel in &mut self.frame.pixels[width as usize * (height / 2) as usize..] {
                     pixel.rgb_bottom = [0; 3]
                 }
             }
 
-            overwrite_and_render(self, command_buffer, image);
+            for j in 0..terminal_height {
+                write_move(command_buffer, 0, j);
+                for i in 0..terminal_width {
+                    self.frame.get_mut(i, j).unwrap().draw(command_buffer)
+                }
+            }
             return;
-        }
-
-        fn within_delta(a: [u8; 3], b: [u8; 3]) -> bool {
-            let [d0, d1, d2] = core::array::from_fn(|i| a[i].abs_diff(b[i]));
-            d0.max(d1).max(d2) <= 6
         }
 
         for j in 0..height / 2 {
