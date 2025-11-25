@@ -276,10 +276,7 @@ impl RenderedFrame {
             let j = height - 1;
             'next_pixel: for i in 0..width {
                 let rgb_t = image.get_pixel(i, j).0;
-                let pixel = self
-                    .frame
-                    .get_mut(i as u16, height.div_ceil(2) as u16)
-                    .unwrap();
+                let pixel = self.frame.get_mut(i as u16, (j / 2) as u16).unwrap();
                 if !within_delta(pixel.rgb_top, rgb_t) {
                     if !last_changed {
                         last_changed = true;
