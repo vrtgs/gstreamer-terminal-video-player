@@ -250,7 +250,7 @@ impl RenderedFrame {
             return;
         }
 
-        for j in 0..height / 2 {
+        for j in 0..(height / 2) {
             let mut last_changed = false;
             'next_pixel: for i in 0..width {
                 let rgb_t = image.get_pixel(i, j * 2).0;
@@ -272,15 +272,16 @@ impl RenderedFrame {
         }
 
         if (height % 2) != 0 {
+            let j = height / 2;
             let mut last_changed = false;
-            let j = height - 1;
             'next_pixel: for i in 0..width {
-                let rgb_t = image.get_pixel(i, j).0;
-                let pixel = self.frame.get_mut(i as u16, (j / 2) as u16).unwrap();
+                let rgb_t = image.get_pixel(i, j * 2).0;
+                let (i, j) = (i as u16, j as u16);
+                let pixel = self.frame.get_mut(i, j).unwrap();
                 if !within_delta(pixel.rgb_top, rgb_t) {
                     if !last_changed {
                         last_changed = true;
-                        write_move(command_buffer, i as u16, j as u16);
+                        write_move(command_buffer, i, j);
                     }
                     pixel.rgb_top = rgb_t;
                     (*pixel).draw(command_buffer);

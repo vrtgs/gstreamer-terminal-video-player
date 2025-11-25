@@ -3,6 +3,7 @@ extern crate gstreamer_app as gst_app;
 extern crate gstreamer_video as gst_video;
 
 use crate::gst::prelude::ElementExtManual;
+use clap::Parser;
 use glib::object::ObjectExt;
 use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
 use std::os::fd::IntoRawFd;
@@ -15,11 +16,7 @@ mod terminal_sink;
 
 mod input_handler;
 
-fn get_source() -> gst::Element {
-    let arg = std::env::args_os()
-        .nth(1)
-        .expect("should pass in argument for file");
-
+fn get_source(video: PathBuf) -> gst::Element {
     macro_rules! exit {
         ($($msg: tt)+) => {
             {
@@ -29,9 +26,7 @@ fn get_source() -> gst::Element {
         };
     }
 
-    let file_path = PathBuf::from(arg);
-
-    match std::fs::File::open(&file_path) {
+    match std::fs::File::open(&video) {
         Ok(file) => {
             #[cfg(unix)]
             {
@@ -64,13 +59,17 @@ fn get_source() -> gst::Element {
     }
 }
 
-fn make_pipeline_and_bus(quit_handler: &mut QuitHandler) -> (gst::Pipeline, gst::Bus) {
-    let source = get_source();
+fn make_pipeline_and_bus(
+    quit_handler: &mut QuitHandler,
+    video: PathBuf,
+    size: Option<(u16, u16)>,
+) -> (gst::Pipeline, gst::Bus) {
+    let source = get_source(video);
     let decode = gst::ElementFactory::make("decodebin3").build().unwrap();
 
     let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
 
-    let video_sink = terminal_sink::create(quit_handler);
+    let video_sink = terminal_sink::create(quit_handler, size);
 
     let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
     let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
@@ -143,10 +142,48 @@ impl Drop for QuitHandler {
     }
 }
 
+#[derive(Debug, Clone)]
+struct Size {
+    width: u16,
+    height: u16,
+}
+
+impl std::str::FromStr for Size {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (w, h) = s.split_once('x').ok_or_else(|| {
+            "size must be in the form {WIDTH}x{HEIGHT} (e.g. 800x600)".to_string()
+        })?;
+
+        let parse = |v: &str| v.parse::<u16>();
+
+        let width = parse(w).map_err(|_| "width must be a positive integer".to_string())?;
+        let height = parse(h).map_err(|_| "height must be a positive integer".to_string())?;
+
+        Ok(Size { width, height })
+    }
+}
+
+#[derive(clap::Parser, Debug)]
+#[command(name = "videoplayer")]
+#[command(about = "Simple video player CLI")]
+struct Cli {
+    /// Video file to play (positional)
+    video: PathBuf,
+
+    /// Window size in the form WIDTHxHEIGHT, e.g. 1280x720
+    #[arg(long, value_parser = clap::value_parser!(Size))]
+    size: Option<Size>,
+}
+
 fn program_main() {
+    let cli = Cli::parse();
+
     let mut quit_handler = QuitHandler { callbacks: vec![] };
 
-    let (pipeline, bus) = make_pipeline_and_bus(&mut quit_handler);
+    let size = cli.size.map(|size| (size.width, size.height));
+    let (pipeline, bus) = make_pipeline_and_bus(&mut quit_handler, cli.video, size);
 
     let defer = defer::defer(|| {
         pipeline.set_state(gst::State::Null).unwrap();
