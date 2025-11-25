@@ -236,21 +236,10 @@ impl TerminalSizeLoader for StaticSize {
 }
 
 fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink, size: Option<(u16, u16)>) {
-    let dynamic;
-    let static_;
     let loader = match size {
-        Some(size) => {
-            static_ = StaticSize::new(size);
-            (&static_) as &dyn TerminalSizeLoader
-        }
-        None => {
-            dynamic = DynamicSize::new(app_sink.clone(), consumer.make_reloader());
-            &dynamic
-        }
+        Some(size) => (&StaticSize::new(size)) as &dyn TerminalSizeLoader,
+        None => &DynamicSize::new(app_sink.clone(), consumer.make_reloader()),
     };
-
-    let mut tty_file;
-    let mut stdout;
 
     trait TTY: Write + AsFd + AsRawFd {}
     impl<T: Write + AsFd + AsRawFd> TTY for T {}
@@ -262,13 +251,14 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink, size: Option
             .expect("app should be ran on xterm compatible terminals")
     }
 
-    let use_stdout = flag("USE_STDOUT", false);
-    let tty: &mut dyn Write = if !use_stdout && let Ok(tty) = termion::get_tty() {
-        tty_file = make_tty(tty);
-        &mut tty_file
+    let tty: &mut dyn Write = if flag("NO_TTY", false) {
+        &mut std::io::stdout().lock()
+    } else if !flag("USE_STDOUT", false)
+        && let Ok(tty) = termion::get_tty()
+    {
+        &mut make_tty(tty)
     } else {
-        stdout = make_tty(std::io::stdout().lock());
-        &mut stdout
+        &mut make_tty(std::io::stdout().lock())
     };
 
     // there will be a clear on the first fetch from the size cache

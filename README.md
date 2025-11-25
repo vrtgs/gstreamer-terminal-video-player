@@ -1,4 +1,4 @@
-# gstreamer-terminal-video-player
+# gstreamer-terminal-video-player (soon videosh)
 
 This project is a demo of a video playing in the terminal!
 
