@@ -147,7 +147,7 @@ fn flag(flag: &str, default: bool) -> bool {
     std::env::var_os(flag).map_or(default, |str| {
         let mut str = str.into_encoded_bytes();
         str.make_ascii_lowercase();
-        matches!(&*str, b"y" | b"yes")
+        matches!(str.trim_ascii(), b"y" | b"yes" | b"")
     })
 }
 
