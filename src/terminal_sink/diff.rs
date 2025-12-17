@@ -109,6 +109,7 @@ impl Cell {
             b: bb,
         } = self.rgb_bottom;
 
+        // Foreground
         command_buffer.extend_from_slice(b"\x1b[38;2;");
         write_u8_ascii(command_buffer, tr);
         command_buffer.push(b';');
