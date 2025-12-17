@@ -1,6 +1,8 @@
-# gstreamer-terminal-video-player (soon videosh)
+# video-less
 
-This project is a demo of a video playing in the terminal!
+This project is enables playing videos in the terminal!
+
+like `less` but for videos
 
 ## Building
 
@@ -15,3 +17,6 @@ To download the demo video:
 ```
 yt-dlp -f mp4 https://www.youtube.com/watch?v=WO2b03Zdu4Q -o demo.mp4
 ```
+
+
+you can also skip forwards and backwards the video or even pause
