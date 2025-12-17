@@ -6,10 +6,19 @@ edition = "2024"
 [profile.dev]
 panic = "abort"
 
+[profile.profiler]
+inherits = "release"
+panic = "abort"
+strip = false
+debug = "full"
+lto = false
+codegen-units = 256
+
 [profile.release]
 panic = "abort"
 strip = true
 lto = "fat"
+codegen-units = 1
 
 [dependencies]
 gstreamer = "0.24.4"
@@ -20,9 +29,9 @@ bytemuck = { version = "1.24.0", features = ["must_cast_extra", "min_const_gener
 clap = { version = "4.5.53", features = ["derive", "color"] }
 resize = { version = "0.8.8", features = ["rayon"] }
 rgb = "0.8.52"
+itoa = "1.0.15"
 glib = "0.21.5"
 defer = "0.2.1"
-ansi_term = "0.12.1"
 parking_lot = "0.12.5"
 
 

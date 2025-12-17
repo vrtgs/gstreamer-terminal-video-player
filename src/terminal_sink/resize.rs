@@ -41,15 +41,6 @@ impl<T: Pod> PodMatrix<T> {
         self.size = size;
     }
 
-    pub fn get_mut(&mut self, i: u16, j: u16) -> Option<&mut T> {
-        let (width, height) = self.size();
-        if i < width && j < height {
-            return Some(unsafe { self.get_mut_unchecked(i, j) });
-        }
-
-        None
-    }
-
     pub unsafe fn get_mut_unchecked(&mut self, i: u16, j: u16) -> &mut T {
         let (width, height) = self.size();
         unsafe {

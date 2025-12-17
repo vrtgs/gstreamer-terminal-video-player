@@ -22,10 +22,6 @@ mod diff;
 mod resize;
 mod video_pipe;
 
-fn cursor_goto(x: u16, y: u16) -> termion::cursor::Goto {
-    termion::cursor::Goto(x.saturating_add(1), y.saturating_add(1))
-}
-
 fn render_sample(
     sample: &gst::Sample,
     app_sink: &AppSink,
