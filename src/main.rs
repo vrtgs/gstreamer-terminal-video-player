@@ -9,12 +9,19 @@ use gst::prelude::{ElementExt, GstBinExtManual, GstObjectExt, PadExt};
 use std::os::fd::IntoRawFd;
 use std::path::PathBuf;
 
+mod input_handler;
 mod launch;
 mod resize_image;
 mod term_size;
 mod terminal_sink;
 
-mod input_handler;
+pub(crate) fn flag(flag: &str, default: bool) -> bool {
+    std::env::var_os(flag).map_or(default, |str| {
+        let mut str = str.into_encoded_bytes();
+        str.make_ascii_lowercase();
+        matches!(str.trim_ascii(), b"y" | b"yes" | b"")
+    })
+}
 
 fn get_source(video: PathBuf) -> gst::Element {
     macro_rules! exit {
@@ -59,48 +66,58 @@ fn get_source(video: PathBuf) -> gst::Element {
     }
 }
 
+fn gstreamer_element(name: &str) -> Result<gst::Element, glib::BoolError> {
+    gst::ElementFactory::make(name).build()
+}
+
 fn make_pipeline_and_bus(
     quit_handler: &mut QuitHandler,
     video: PathBuf,
     size: Option<(u16, u16)>,
 ) -> (gst::Pipeline, gst::Bus) {
     let source = get_source(video);
-    let decode = gst::ElementFactory::make("decodebin3").build().unwrap();
+    let decode = gstreamer_element("decodebin3")
+        .or_else(|_| gstreamer_element("decodebin"))
+        .unwrap();
 
-    let convert = gst::ElementFactory::make("videoconvert").build().unwrap();
+    let convert = gstreamer_element("videoconvert").unwrap();
 
     let video_sink = terminal_sink::create(quit_handler, size);
 
-    let audio_convert = gst::ElementFactory::make("audioconvert").build().unwrap();
-    let audio_resample = gst::ElementFactory::make("audioresample").build().unwrap();
-    let audio_sink = gst::ElementFactory::make("autoaudiosink").build().unwrap();
+    let audio_enabled = !flag("NO_AUDIO_OUTPUT", false);
+
+    let audio_convert = gstreamer_element("audioconvert").unwrap();
+    let audio_resample = gstreamer_element("audioresample").unwrap();
+    let audio_sink = gstreamer_element("autoaudiosink").unwrap();
 
     let pipeline = gst::Pipeline::new();
 
-    let line = [
-        &source,
-        &decode,
-        &convert,
-        &audio_convert,
-        &audio_resample,
-        &video_sink,
-        &audio_sink,
-    ];
+    let line = [&source, &decode, &convert, &video_sink];
 
     pipeline.add_many(line).unwrap();
 
+    let audio_line = [&audio_convert, &audio_resample, &audio_sink];
+
+    if audio_enabled {
+        pipeline.add_many(audio_line).unwrap();
+        gst::Element::link_many(audio_line).unwrap();
+    }
+
     source.link(&decode).unwrap();
     convert.link(&video_sink).unwrap();
-    gst::Element::link_many([&audio_convert, &audio_resample, &audio_sink]).unwrap();
 
     decode.connect_pad_added(move |_decode, src_pad| {
         let caps = src_pad
             .current_caps()
             .unwrap_or_else(|| src_pad.query_caps(None));
         let structure = caps.structure(0).unwrap();
-        let media_type = structure.name();
+        let media_type = structure.name().as_str();
 
         if media_type.starts_with("audio/") {
+            if !audio_enabled {
+                return;
+            }
+
             let sink_pad = audio_convert.static_pad("sink").unwrap();
             if sink_pad.is_linked() {
                 return;
@@ -112,8 +129,6 @@ fn make_pipeline_and_bus(
                 return;
             }
             src_pad.link(&sink_pad).expect("Failed to link video pad");
-        } else {
-            eprintln!("Unknown pad type: {}", media_type);
         }
     });
 

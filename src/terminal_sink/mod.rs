@@ -1,7 +1,7 @@
 use crate::term_size::TerminalSizeUpdater;
-use crate::terminal_sink::resize::{ImageRef, RenderedFrame, ResizeBuffer, Resizer};
+use crate::terminal_sink::resize::{ImageRef, RenderedFrame, Resizer};
 use crate::terminal_sink::video_pipe::{SampleConsumer, SampleProducer, SampleReloader};
-use crate::{QuitHandler, resize_image};
+use crate::{QuitHandler, flag, resize_image};
 use glib::object::Cast;
 use gst::element_error;
 use gst::prelude::ElementExtManual;
@@ -30,7 +30,6 @@ fn render_sample(
     term_size: (u16, u16),
     fresh_redraw: bool,
     command_buffer: &mut Vec<u8>,
-    resize_buffer: &mut ResizeBuffer,
     resizer: &mut Resizer,
     last_frame: &mut RenderedFrame,
     stdout: &mut dyn Write,
@@ -67,7 +66,7 @@ fn render_sample(
         element_error!(
             app_sink,
             gst::ResourceError::Failed,
-            ("invalid video sample divisions")
+            ("invalid video sample dimentions")
         );
     })?;
 
@@ -89,21 +88,7 @@ fn render_sample(
 
     let (new_width, new_height) = (new_width as u16, new_height as u16);
 
-    let resized = {
-        if resize_buffer.width() != new_width || resize_buffer.height() != new_height {
-            resize_buffer.resize((new_width, new_height))
-        }
-
-        resizer.resize(image, resize_buffer).as_image_crate_buffer()
-    };
-
-    // a good enough size each pixel gets 48 bytes because ansi is that inefficient
-    // and 24 bytes for each newlines goto
-    // and a constant 512 bytes extra for good measure
-    let expected_size =
-        (resized.as_raw().len() * 48) + (usize::from(new_height.div_ceil(2)) * 24) + 512;
-
-    command_buffer.reserve(expected_size);
+    let resized = resizer.resize(image, (new_width, new_height));
 
     let offset = (
         (term_width - (new_width)) / 2,
@@ -141,14 +126,6 @@ fn send_new_sample(
 
         Ok(gst::FlowSuccess::Ok)
     }
-}
-
-fn flag(flag: &str, default: bool) -> bool {
-    std::env::var_os(flag).map_or(default, |str| {
-        let mut str = str.into_encoded_bytes();
-        str.make_ascii_lowercase();
-        matches!(str.trim_ascii(), b"y" | b"yes" | b"")
-    })
 }
 
 struct TerminalSizeLoadResult {
@@ -268,7 +245,6 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink, size: Option
 
     // 8mb default
     let mut screen_buff = Vec::with_capacity(8 * 1024 * 1024);
-    let mut resize_buffer = ResizeBuffer::new();
     let mut resizer = Resizer::new();
     let mut last_frame = RenderedFrame::new();
 
@@ -286,7 +262,6 @@ fn run_renderer_thread(consumer: SampleConsumer, app_sink: AppSink, size: Option
             size_res.size,
             size_res.changed,
             &mut screen_buff,
-            &mut resize_buffer,
             &mut resizer,
             &mut last_frame,
             tty,
