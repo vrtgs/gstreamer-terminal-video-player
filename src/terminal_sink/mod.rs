@@ -1,5 +1,6 @@
 use crate::term_size::TerminalSizeUpdater;
-use crate::terminal_sink::resize::{ImageRef, RenderedFrame, Resizer};
+use crate::terminal_sink::diff::RenderedFrame;
+use crate::terminal_sink::resize::{ImageRef, Resizer};
 use crate::terminal_sink::video_pipe::{SampleConsumer, SampleProducer, SampleReloader};
 use crate::{QuitHandler, flag, resize_image};
 use glib::object::Cast;
@@ -17,6 +18,7 @@ use std::time::Duration;
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
 
+mod diff;
 mod resize;
 mod video_pipe;
 

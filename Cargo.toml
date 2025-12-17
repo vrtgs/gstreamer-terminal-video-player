@@ -18,16 +18,13 @@ gstreamer-video = "0.24.4"
 termion = { version = "4.0.6", default-features = false }
 bytemuck = { version = "1.24.0", features = ["must_cast_extra", "min_const_generics", "derive"] }
 clap = { version = "4.5.53", features = ["derive", "color"] }
+resize = { version = "0.8.8", features = ["rayon"] }
+rgb = "0.8.52"
 glib = "0.21.5"
 defer = "0.2.1"
 ansi_term = "0.12.1"
 parking_lot = "0.12.5"
-resize = { version = "0.8.8", features = ["rayon"] }
 
-# enable bytemuck on rgb to
-[dependencies.rgb]
-version = "0.8.52"
-features = ["bytemuck"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"

@@ -1,6 +1,5 @@
-use crate::terminal_sink::cursor_goto;
 use bytemuck::Pod;
-use std::io::Write;
+use rgb::Rgb;
 use std::num::NonZero;
 
 pub struct PodMatrix<T: Pod> {
@@ -59,8 +58,12 @@ impl<T: Pod> PodMatrix<T> {
             let idx = (j as usize)
                 .unchecked_mul(width as usize)
                 .unchecked_add(i as usize);
-            self.cells.as_mut_slice().get_unchecked_mut(idx)
+            self.cells.get_unchecked_mut(idx)
         }
+    }
+
+    pub const fn as_mut_slice(&mut self) -> &mut [T] {
+        self.cells.as_mut_slice()
     }
 
     pub const fn width(&self) -> u16 {
@@ -79,7 +82,7 @@ impl<T: Pod> PodMatrix<T> {
 #[derive(Copy, Clone)]
 pub struct ImageRef<'a> {
     size: (u32, u32),
-    pixels: &'a [U8x3],
+    pixels: &'a [Rgb<u8>],
 }
 
 impl<'a> ImageRef<'a> {
@@ -107,7 +110,22 @@ impl<'a> ImageRef<'a> {
         })
     }
 
-    fn size(&self) -> (u32, u32) {
+    pub unsafe fn get_pixel_unchecked(&self, i: u32, j: u32) -> Rgb<u8> {
+        unsafe {
+            // Safety: up to called
+            let i_usize = usize::try_from(i).unwrap_unchecked();
+            let j_usize = usize::try_from(j).unwrap_unchecked();
+
+            // this is always safe since we have a pixel buffer
+            // of this size in memory
+            let width = usize::try_from(self.size.0).unwrap_unchecked();
+            *self
+                .pixels
+                .get_unchecked(j_usize.unchecked_mul(width).unchecked_add(i_usize))
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
         self.size
     }
 
@@ -125,9 +143,7 @@ impl<'a> ImageRef<'a> {
     }
 }
 
-type U8x3 = [u8; 3];
-
-impl PodMatrix<U8x3> {
+impl PodMatrix<Rgb<u8>> {
     pub fn as_image(&self) -> ImageRef<'_> {
         ImageRef {
             size: (self.width().into(), self.height().into()),
@@ -163,7 +179,7 @@ struct ResizingBuffer {
 }
 
 pub struct Resizer {
-    image_buffer: PodMatrix<U8x3>,
+    image_buffer: PodMatrix<Rgb<u8>>,
     resizing_buffer: Option<ResizingBuffer>,
 }
 
@@ -186,7 +202,7 @@ impl Resizer {
         }
 
         let Some((src_width, src_height)) = image.as_non_zero_size() else {
-            self.image_buffer.cells.fill([0; 3]);
+            self.image_buffer.cells.fill(Rgb::new(0, 0, 0));
             return self.image_buffer.as_image();
         };
 
@@ -224,164 +240,11 @@ impl Resizer {
             }
         };
 
-        let res = resizer.resize(
-            bytemuck::must_cast_slice(image.pixels),
-            bytemuck::must_cast_slice_mut(self.image_buffer.cells.as_mut_slice()),
-        );
+        let res = resizer.resize(image.pixels, self.image_buffer.cells.as_mut_slice());
 
         // this should never happen since its validated that all parameters are valid
         res.unwrap();
 
         self.image_buffer.as_image()
-    }
-}
-
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-pub struct Cell {
-    rgb_top: U8x3,
-    rgb_bottom: U8x3,
-}
-
-impl Cell {
-    pub fn draw(self, command_buffer: &mut Vec<u8>) {
-        const UNICODE_TOP_HALF_BLOCK: &str = "\u{2580}";
-
-        let [tr, tg, tb] = self.rgb_top;
-        let [br, bg, bb] = self.rgb_bottom;
-
-        let cell = ansi_term::Color::RGB(tr, tg, tb)
-            .on(ansi_term::Colour::RGB(br, bg, bb))
-            .paint(UNICODE_TOP_HALF_BLOCK);
-        write!(command_buffer, "{cell}").unwrap();
-    }
-}
-
-pub struct RenderedFrame {
-    frame: PodMatrix<Cell>,
-}
-
-impl RenderedFrame {
-    pub fn new() -> Self {
-        Self {
-            frame: PodMatrix::new(),
-        }
-    }
-
-    pub fn render(
-        &mut self,
-        image_ref: ImageRef,
-        overwrite: bool,
-        offset: (u16, u16),
-        command_buffer: &mut Vec<u8>,
-    ) {
-        let get_pixel = move |i, j| {
-            let width = image_ref.size.0;
-            let rgb = image_ref.pixels[j as usize * width as usize + i as usize];
-
-            // quantize to only N bit color
-            const N: u8 = 5;
-            const MASK: u8 = {
-                assert!(N <= 8);
-                u8::MAX << (8 - N)
-            };
-
-            rgb.map(|x| x & MASK)
-        };
-
-        let (width, height) = image_ref.size();
-        let terminal_size = (
-            u16::try_from(width).unwrap(),
-            u16::try_from(height.div_ceil(2)).unwrap(),
-        );
-
-        let (offset_width, offset_height) = offset;
-        let (terminal_width, terminal_height) = terminal_size;
-
-        let overwrite = overwrite || terminal_size != self.frame.size;
-        if terminal_size != self.frame.size {
-            self.frame.resize(terminal_size);
-        }
-
-        if overwrite {
-            command_buffer.extend_from_slice(termion::clear::All.as_ref());
-        }
-
-        let write_move = move |command_buffer: &mut Vec<u8>, i: u16, j: u16| {
-            write!(
-                command_buffer,
-                "{}",
-                cursor_goto(offset_width + i, offset_height + j)
-            )
-            .unwrap();
-        };
-
-        if overwrite {
-            for j in 0..height {
-                for i in 0..width {
-                    let rgb = get_pixel(i, j);
-                    let pixel = self.frame.get_mut(i as u16, (j / 2) as u16).unwrap();
-                    match j & 1 {
-                        0 => pixel.rgb_top = rgb,
-                        _ => pixel.rgb_bottom = rgb,
-                    }
-                }
-            }
-
-            if (height % 2) != 0 {
-                for pixel in &mut self.frame.cells[width as usize * (height / 2) as usize..] {
-                    pixel.rgb_bottom = [0; 3]
-                }
-            }
-
-            for j in 0..terminal_height {
-                write_move(command_buffer, 0, j);
-                for i in 0..terminal_width {
-                    self.frame.get_mut(i, j).unwrap().draw(command_buffer)
-                }
-            }
-            return;
-        }
-
-        for j in 0..(height / 2) {
-            let mut last_changed = false;
-            'next_pixel: for i in 0..width {
-                let rgb_t = get_pixel(i, j * 2);
-                let rgb_b = get_pixel(i, j * 2 + 1);
-                let (i, j) = (i as u16, j as u16);
-                let pixel = self.frame.get_mut(i, j).unwrap();
-                if pixel.rgb_top != rgb_t || pixel.rgb_bottom != rgb_b {
-                    if !last_changed {
-                        last_changed = true;
-                        write_move(command_buffer, i, j);
-                    }
-                    pixel.rgb_top = rgb_t;
-                    pixel.rgb_bottom = rgb_b;
-                    (*pixel).draw(command_buffer);
-                    continue 'next_pixel;
-                }
-                last_changed = false;
-            }
-        }
-
-        if (height % 2) != 0 {
-            let j = height / 2;
-            let mut last_changed = false;
-            'next_pixel: for i in 0..width {
-                let rgb_t = get_pixel(i, j * 2);
-                let (i, j) = (i as u16, j as u16);
-                let pixel = self.frame.get_mut(i, j).unwrap();
-                if pixel.rgb_top != rgb_t {
-                    if !last_changed {
-                        last_changed = true;
-                        write_move(command_buffer, i, j);
-                    }
-                    pixel.rgb_top = rgb_t;
-                    (*pixel).draw(command_buffer);
-                    continue 'next_pixel;
-                }
-                last_changed = false;
-            }
-        }
     }
 }
